@@ -5,6 +5,7 @@ const ffmpegPath = require("@ffmpeg-installer/ffmpeg").path
 const axios = require("axios")
 const fs = require("fs")
 const path = require("path")
+const multer = require("multer")
 const { AssemblyAI } = require("assemblyai")
 
 ffmpeg.setFfmpegPath(ffmpegPath)
@@ -16,37 +17,51 @@ app.use(express.json())
 const PORT = process.env.PORT || 3001
 const aai = new AssemblyAI({ apiKey: "cebb6f1cb4ff45859bec0510b9d92c0f" })
 
+const upload = multer({
+  dest: "/tmp/uploads/",
+  limits: { fileSize: 2 * 1024 * 1024 * 1024 }, // 2GB
+})
+
 app.get("/health", (req, res) => {
   res.json({ status: "ok" })
 })
 
+app.post("/upload", upload.single("file"), (req, res) => {
+  if (!req.file) return res.status(400).json({ error: "Aucun fichier" })
+  const fileUrl = `${req.protocol}://${req.get("host")}/tmp/${req.file.filename}`
+  res.json({ path: req.file.path, filename: req.file.filename })
+})
+
 app.post("/generate", async (req, res) => {
-  const { videoUrl, prompt, options, musicUrl } = req.body
+  const { videoUrl, videoPath, prompt, options, musicUrl } = req.body
   console.log("Options reçues:", options)
   console.log("Prompt reçu:", prompt)
 
-  if (!videoUrl) return res.status(400).json({ error: "videoUrl requis" })
+  if (!videoUrl && !videoPath) return res.status(400).json({ error: "videoUrl ou videoPath requis" })
 
   const tmpDir = "/tmp"
-  const inputPath = path.join(tmpDir, `input_${Date.now()}.mp4`)
+  const inputPath = videoPath || path.join(tmpDir, `input_${Date.now()}.mp4`)
   const clips = []
+  let downloadedFile = false
 
   try {
-    // Télécharger la vidéo
-    const response = await axios({ url: videoUrl, method: "GET", responseType: "stream" })
-    const writer = fs.createWriteStream(inputPath)
-    response.data.pipe(writer)
-    await new Promise((resolve, reject) => {
-      writer.on("finish", resolve)
-      writer.on("error", reject)
-    })
+    if (videoUrl && !videoPath) {
+      downloadedFile = true
+      const response = await axios({ url: videoUrl, method: "GET", responseType: "stream" })
+      const writer = fs.createWriteStream(inputPath)
+      response.data.pipe(writer)
+      await new Promise((resolve, reject) => {
+        writer.on("finish", resolve)
+        writer.on("error", reject)
+      })
+    }
 
-    // Transcription avec AssemblyAI si sous-titres demandés
     let subtitles = []
     if (options?.includes("Sous-titres")) {
       console.log("Transcription en cours...")
       try {
-        const transcript = await aai.transcripts.transcribe({ audio: videoUrl, language_detection: true })
+        const audioFile = fs.readFileSync(inputPath)
+        const transcript = await aai.transcripts.transcribe({ audio: videoUrl || inputPath, language_detection: true })
         if (transcript.words) {
           subtitles = transcript.words.map(w => ({
             text: w.text,
@@ -70,7 +85,6 @@ app.post("/generate", async (req, res) => {
       const outputPath = path.join(tmpDir, `${clip.name}_${Date.now()}.mp4`)
       const srtPath = path.join(tmpDir, `${clip.name}_${Date.now()}.srt`)
 
-      // Générer le fichier SRT pour ce clip
       if (subtitles.length > 0) {
         const clipSubs = subtitles.filter(s => s.start >= clip.start && s.start < clip.start + clip.duration)
         if (clipSubs.length > 0) {
@@ -99,11 +113,7 @@ app.post("/generate", async (req, res) => {
 
         if (subtitles.length > 0 && fs.existsSync(srtPath)) {
           cmd = cmd.outputOptions([
-            `-vf subtitles=${srtPath}:force_style='FontName=Helvetica,FontSize=18,PrimaryColour=&HFFFFFF,OutlineColour=&H000000,Outline=2,Alignment=2'`
-          ])
-        } else if (options?.includes("Sous-titres")) {
-          cmd = cmd.outputOptions([
-            "-vf drawtext=fontfile=/System/Library/Fonts/Helvetica.ttc:text='...':fontcolor=white:fontsize=40:x=(w-text_w)/2:y=h-100"
+            `-vf subtitles=${srtPath}:force_style='FontSize=18,PrimaryColour=&HFFFFFF,OutlineColour=&H000000,Outline=2,Alignment=2'`
           ])
         }
 
@@ -132,13 +142,15 @@ app.post("/generate", async (req, res) => {
       fs.unlinkSync(outputPath)
     }
 
-    fs.unlinkSync(inputPath)
+    if (downloadedFile && fs.existsSync(inputPath)) fs.unlinkSync(inputPath)
+    if (videoPath && fs.existsSync(videoPath)) fs.unlinkSync(videoPath)
     console.log("Génération terminée !")
     res.json({ clips })
 
   } catch (err) {
     console.error(err)
-    if (fs.existsSync(inputPath)) fs.unlinkSync(inputPath)
+    if (downloadedFile && fs.existsSync(inputPath)) fs.unlinkSync(inputPath)
+    if (videoPath && fs.existsSync(videoPath)) fs.unlinkSync(videoPath)
     res.status(500).json({ error: err.message })
   }
 })
