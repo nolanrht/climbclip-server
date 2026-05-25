@@ -12,6 +12,7 @@
   "type": "commonjs",
   "dependencies": {
     "@ffmpeg-installer/ffmpeg": "^1.1.0",
+    "assemblyai": "^4.33.3",
     "axios": "^1.16.1",
     "cors": "^2.8.6",
     "express": "^5.2.1",
