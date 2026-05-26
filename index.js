@@ -33,40 +33,10 @@ app.get("/health", (req, res) => {
   res.json({ status: "ok" })
 })
 
-app.post("/download", async (req, res) => {
-  const { url } = req.body
-  if (!url) return res.status(400).json({ error: "URL requise" })
-  const outputPath = path.join("/tmp", `yt_${Date.now()}.mp4`)
-  try {
-    console.log("Téléchargement via Cobalt:", url)
-    const cobaltRes = await axios.post("https://api.cobalt.tools/", {
-      url,
-      videoQuality: "720",
-      filenameStyle: "basic"
-    }, {
-      headers: {
-        "Accept": "application/json",
-        "Content-Type": "application/json"
-      }
-    })
-    
-    const downloadUrl = cobaltRes.data.url
-    if (!downloadUrl) throw new Error("Pas d'URL de téléchargement")
-    
-    const response = await axios({ url: downloadUrl, method: "GET", responseType: "stream" })
-    const writer = fs.createWriteStream(outputPath)
-    response.data.pipe(writer)
-    await new Promise((resolve, reject) => {
-      writer.on("finish", resolve)
-      writer.on("error", reject)
-    })
-    
-    console.log("Téléchargé:", outputPath)
-    res.json({ path: outputPath })
-  } catch (err) {
-    console.error("Erreur download:", err.message)
-    res.status(500).json({ error: err.message })
-  }
+app.post("/upload", upload.single("file"), async (req, res) => {
+  if (!req.file) return res.status(400).json({ error: "Aucun fichier" })
+  console.log("Fichier reçu:", req.file.path)
+  res.json({ path: req.file.path })
 })
 
 app.post("/download", async (req, res) => {
@@ -75,11 +45,11 @@ app.post("/download", async (req, res) => {
   const outputPath = path.join("/tmp", `yt_${Date.now()}.mp4`)
   try {
     console.log("Téléchargement:", url)
-    await execAsync(`yt-dlp --extractor-args "youtube:player_client=android" -f "best[ext=mp4]/best" -o "${outputPath}" "${url}"`)
+    await execAsync(`yt-dlp --extractor-args "youtube:player_client=android,web" --add-headers "User-Agent:Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15" -f "best[ext=mp4]/best" -o "${outputPath}" "${url}"`)
     console.log("Téléchargé:", outputPath)
     res.json({ path: outputPath })
   } catch (err) {
-    console.error("Erreur yt-dlp:", err)
+    console.error("Erreur yt-dlp:", err.message)
     res.status(500).json({ error: err.message })
   }
 })
@@ -171,11 +141,10 @@ async function processVideo({ jobId, videoUrls, videoPaths, prompt, options, mus
 
     jobs[jobId].progress = 45
 
-    // Analyse IA
     let durations = [
-      { start: 0, duration: 15, name: "clip1" },
-      { start: 5, duration: 20, name: "clip2" },
-      { start: 10, duration: 25, name: "clip3" },
+      { start: 0, duration: 15, name: "Edit #1" },
+      { start: 5, duration: 20, name: "Edit #2" },
+      { start: 10, duration: 25, name: "Edit #3" },
     ]
 
     try {
