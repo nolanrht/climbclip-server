@@ -76,6 +76,32 @@ console.log("videoUrls reçus:", videoUrls)
   processVideo({ jobId, videoUrls, videoPaths, prompt, options, musicUrl })
 })
 
+app.post("/prompt-help", async (req, res) => {
+  const { description, refVideoFrames } = req.body
+  try {
+    const messages = [{
+      role: "user",
+      content: refVideoFrames ? [
+        ...refVideoFrames.map((frame) => ({
+          type: "image",
+          source: { type: "base64", media_type: "image/jpeg", data: frame }
+        })),
+        { type: "text", text: `Tu es un expert en edits TikTok foot/sport. L'utilisateur veut créer un edit et a fourni des images de référence + cette description: "${description}". Génère un prompt parfait et détaillé pour générer cet edit. Réponds uniquement avec le prompt, rien d'autre.` }
+      ] : [{ type: "text", text: `Tu es un expert en edits TikTok foot/sport. L'utilisateur veut: "${description}". Génère un prompt parfait et détaillé pour générer cet edit. Réponds uniquement avec le prompt, rien d'autre.` }]
+    }]
+
+    const response = await anthropic.messages.create({
+      model: "claude-sonnet-4-5",
+      max_tokens: 500,
+      messages
+    })
+
+    res.json({ prompt: response.content[0].type === "text" ? response.content[0].text : "" })
+  } catch (err) {
+    res.status(500).json({ error: err.message })
+  }
+})
+
 app.get("/status/:jobId", (req, res) => {
   const job = jobs[req.params.jobId]
   if (!job) return res.status(404).json({ error: "Job introuvable" })
