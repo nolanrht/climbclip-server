@@ -99,7 +99,7 @@ async function processVideo({ jobId, videoUrls, videoPaths, prompt, options, mus
         writer.on("error", reject)
       })
       inputPaths.push(inputPath)
-      jobs[jobId].progress = 10 + Math.floor((i + 1) / (videoUrls.length) * 20)
+      jobs[jobId].progress = 10 + Math.floor((i + 1) / videoUrls.length * 20)
     }
 
     for (const p of (videoPaths || [])) {
@@ -128,6 +128,25 @@ async function processVideo({ jobId, videoUrls, videoPaths, prompt, options, mus
     }
 
     jobs[jobId].progress = 40
+
+    // Télécharger la musique si fournie
+    let musicPath = null
+    if (musicUrl) {
+      try {
+        musicPath = path.join(tmpDir, `music_${Date.now()}.mp3`)
+        const musicResponse = await axios({ url: musicUrl, method: "GET", responseType: "stream" })
+        const musicWriter = fs.createWriteStream(musicPath)
+        musicResponse.data.pipe(musicWriter)
+        await new Promise((resolve, reject) => {
+          musicWriter.on("finish", resolve)
+          musicWriter.on("error", reject)
+        })
+        console.log("Musique téléchargée:", musicPath)
+      } catch (e) {
+        console.error("Erreur téléchargement musique:", e.message)
+        musicPath = null
+      }
+    }
 
     let subtitles = []
     if (options?.includes("Sous-titres")) {
@@ -160,20 +179,21 @@ async function processVideo({ jobId, videoUrls, videoPaths, prompt, options, mus
 
 La vidéo fait ${Math.round(totalDuration)} secondes au total.
 Prompt de l'utilisateur: "${prompt || "fais des edits dynamiques"}"
-Options activées: ${(options || []).join(", ")}
 
-Génère 3 clips parfaits pour TikTok. Réponds UNIQUEMENT avec un JSON valide, rien d'autre:
+Analyse le prompt et détermine le nombre de clips demandés (par défaut 3 si non précisé).
+Génère exactement ce nombre de clips. Réponds UNIQUEMENT avec un JSON valide, rien d'autre:
 [
   {"start": 0, "duration": 15, "name": "Edit #1"},
-  {"start": 10, "duration": 20, "name": "Edit #2"},
-  {"start": 25, "duration": 12, "name": "Edit #3"}
+  {"start": 20, "duration": 18, "name": "Edit #2"},
+  {"start": 45, "duration": 12, "name": "Edit #3"}
 ]
 
 Règles:
 - start + duration ne doit pas dépasser ${Math.round(totalDuration)}
 - durées entre 10 et 30 secondes
 - varie les moments pour couvrir toute la vidéo
-- si le prompt mentionne un joueur ou action spécifique, adapte les timestamps`
+- si le prompt mentionne un joueur ou action spécifique, adapte les timestamps
+- si le prompt dit "1 clip" ou "un clip" génère un seul objet dans le tableau`
         }]
       })
 
@@ -221,7 +241,15 @@ Règles:
         let cmd = ffmpeg(mainInput)
           .setStartTime(clip.start)
           .setDuration(clip.duration)
-          .outputOptions(["-c:v libx264", "-c:a aac", "-movflags faststart"])
+          .outputOptions(["-c:v libx264", "-movflags faststart"])
+
+        if (musicPath && fs.existsSync(musicPath)) {
+          cmd = cmd
+            .input(musicPath)
+            .outputOptions(["-c:a aac", "-map 0:v:0", "-map 1:a:0", "-shortest"])
+        } else {
+          cmd = cmd.outputOptions(["-c:a aac"])
+        }
 
         if (subtitles.length > 0 && fs.existsSync(srtPath)) {
           cmd = cmd.outputOptions([`-vf subtitles=${srtPath}:force_style='FontSize=18,PrimaryColour=&HFFFFFF,OutlineColour=&H000000,Outline=2,Alignment=2'`])
@@ -247,6 +275,7 @@ Règles:
       jobs[jobId].progress = 50 + Math.floor((ci + 1) / durations.length * 50)
     }
 
+    if (musicPath && fs.existsSync(musicPath)) fs.unlinkSync(musicPath)
     for (const p of inputPaths) { if (fs.existsSync(p)) try { fs.unlinkSync(p) } catch {} }
 
     jobs[jobId] = { status: "done", progress: 100, clips }
