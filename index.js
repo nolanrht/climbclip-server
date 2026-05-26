@@ -45,7 +45,7 @@ app.post("/download", async (req, res) => {
   const outputPath = path.join("/tmp", `yt_${Date.now()}.mp4`)
   try {
     console.log("Téléchargement:", url)
-    await execAsync(`yt-dlp --extractor-args "youtube:player_client=android,web" --add-headers "User-Agent:Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15" -f "best[ext=mp4]/best" -o "${outputPath}" "${url}"`)
+    await execAsync(`yt-dlp --extractor-args "youtube:player_client=android,mweb" --user-agent "Mozilla/5.0 (Linux; Android 12; Pixel 6) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/112.0.0.0 Mobile Safari/537.36" -f "best[ext=mp4]/best" --no-check-certificates -o "${outputPath}" "${url}"`)
     console.log("Téléchargé:", outputPath)
     res.json({ path: outputPath })
   } catch (err) {
