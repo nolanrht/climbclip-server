@@ -19,21 +19,22 @@ const aai = new AssemblyAI({ apiKey: "cebb6f1cb4ff45859bec0510b9d92c0f" })
 
 const upload = multer({
   dest: "/tmp/uploads/",
-  limits: { fileSize: 2 * 1024 * 1024 * 1024 }, // 2GB
+  limits: { fileSize: 2 * 1024 * 1024 * 1024 },
 })
 
 app.get("/health", (req, res) => {
   res.json({ status: "ok" })
 })
 
-app.post("/upload", upload.single("file"), (req, res) => {
+app.post("/upload", upload.single("file"), async (req, res) => {
   if (!req.file) return res.status(400).json({ error: "Aucun fichier" })
-  const fileUrl = `${req.protocol}://${req.get("host")}/tmp/${req.file.filename}`
-  res.json({ path: req.file.path, filename: req.file.filename })
+  console.log("Fichier reçu:", req.file.path)
+  res.json({ path: req.file.path })
 })
 
 app.post("/generate", async (req, res) => {
   const { videoUrl, videoPath, prompt, options, musicUrl } = req.body
+  console.log("Generate appelé - videoPath:", videoPath, "videoUrl:", videoUrl)
   console.log("Options reçues:", options)
   console.log("Prompt reçu:", prompt)
 
@@ -60,8 +61,10 @@ app.post("/generate", async (req, res) => {
     if (options?.includes("Sous-titres")) {
       console.log("Transcription en cours...")
       try {
-        const audioFile = fs.readFileSync(inputPath)
-        const transcript = await aai.transcripts.transcribe({ audio: videoUrl || inputPath, language_detection: true })
+        const transcript = await aai.transcripts.transcribe({
+          audio: videoUrl || inputPath,
+          language_detection: true
+        })
         if (transcript.words) {
           subtitles = transcript.words.map(w => ({
             text: w.text,
