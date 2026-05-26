@@ -6,11 +6,11 @@ const axios = require("axios")
 const fs = require("fs")
 const path = require("path")
 const multer = require("multer")
-const aai = new AssemblyAI({ apiKey: process.env.ASSEMBLYAI_API_KEY })
+const { AssemblyAI } = require("assemblyai")
+const Anthropic = require("@anthropic-ai/sdk")
 const { exec } = require("child_process")
 const { promisify } = require("util")
 const execAsync = promisify(exec)
-const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY })
 
 ffmpeg.setFfmpegPath(ffmpegPath)
 
@@ -19,8 +19,8 @@ app.use(cors())
 app.use(express.json())
 
 const PORT = process.env.PORT || 3001
-const aai = new AssemblyAI({ apiKey: "cebb6f1cb4ff45859bec0510b9d92c0f" })
-const anthropic = new Anthropic({ apiKey: "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" })
+const aai = new AssemblyAI({ apiKey: process.env.ASSEMBLYAI_API_KEY })
+const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY })
 
 const upload = multer({
   dest: "/tmp/uploads/",
