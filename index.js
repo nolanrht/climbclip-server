@@ -65,17 +65,6 @@ app.post("/thumbnail", async (req, res) => {
   }
 })
 
-app.post("/generate", async (req, res) => {
-  const { videoUrls, videoPaths, prompt, options, musicUrl } = req.body
-  if (!videoUrls?.length && !videoPaths?.length) return res.status(400).json({ error: "Aucune vidéo" })
-  const jobId = `job_${Date.now()}`
-  jobs[jobId] = { status: "processing", progress: 0, clips: null, error: null }
-  console.log("videoPaths reçus:", videoPaths)
-console.log("videoUrls reçus:", videoUrls)
-  res.json({ jobId })
-  processVideo({ jobId, videoUrls, videoPaths, prompt, options, musicUrl })
-})
-
 app.post("/prompt-help", async (req, res) => {
   const { description, refVideoFrames } = req.body
   try {
@@ -102,6 +91,17 @@ app.post("/prompt-help", async (req, res) => {
   }
 })
 
+app.post("/generate", async (req, res) => {
+  const { videoUrls, videoPaths, prompt, options, musicUrl } = req.body
+  if (!videoUrls?.length && !videoPaths?.length) return res.status(400).json({ error: "Aucune vidéo" })
+  const jobId = `job_${Date.now()}`
+  jobs[jobId] = { status: "processing", progress: 0, clips: null, error: null }
+  console.log("videoPaths reçus:", videoPaths)
+  console.log("videoUrls reçus:", videoUrls)
+  res.json({ jobId })
+  processVideo({ jobId, videoUrls, videoPaths, prompt, options, musicUrl })
+})
+
 app.get("/status/:jobId", (req, res) => {
   const job = jobs[req.params.jobId]
   if (!job) return res.status(404).json({ error: "Job introuvable" })
@@ -116,7 +116,7 @@ async function processVideo({ jobId, videoUrls, videoPaths, prompt, options, mus
   try {
     jobs[jobId] = { status: "processing", progress: 5, clips: null, error: null }
     console.log("videoPaths reçus:", videoPaths)
-console.log("videoUrls reçus:", videoUrls)
+    console.log("videoUrls reçus:", videoUrls)
 
     for (let i = 0; i < (videoUrls || []).length; i++) {
       const url = videoUrls[i]
@@ -159,7 +159,6 @@ console.log("videoUrls reçus:", videoUrls)
 
     jobs[jobId].progress = 40
 
-    // Télécharger la musique si fournie
     let musicPath = null
     if (musicUrl) {
       try {
@@ -211,7 +210,7 @@ La vidéo fait ${Math.round(totalDuration)} secondes au total.
 Prompt de l'utilisateur: "${prompt || "fais des edits dynamiques"}"
 
 Analyse le prompt et détermine le nombre de clips demandés (par défaut 3 si non précisé).
-Génère exactement ce nombre de clips. Réponds UNIQUEMENT avec un JSON valide, rien d'autre:
+Génère exactement ce nombre de clips. Réponds UNIQUEMENT avec un JSON valide sans backticks ni markdown, juste le tableau JSON brut:
 [
   {"start": 0, "duration": 15, "name": "Edit #1"},
   {"start": 20, "duration": 18, "name": "Edit #2"},
@@ -228,7 +227,8 @@ Règles:
       })
 
       const aiText = aiResponse.content[0].type === "text" ? aiResponse.content[0].text : ""
-      const parsed = JSON.parse(aiText.trim())
+      const cleanText = aiText.replace(/```json\n?/g, "").replace(/```\n?/g, "").trim()
+      const parsed = JSON.parse(cleanText)
       if (Array.isArray(parsed) && parsed.length > 0) {
         durations = parsed.map((d, i) => ({
           start: Math.max(0, Math.min(d.start, totalDuration - d.duration)),
