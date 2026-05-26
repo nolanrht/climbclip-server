@@ -10,6 +10,7 @@ const { AssemblyAI } = require("assemblyai")
 const { exec } = require("child_process")
 const { promisify } = require("util")
 const execAsync = promisify(exec)
+const Anthropic = require("@anthropic-ai/sdk")
 
 ffmpeg.setFfmpegPath(ffmpegPath)
 
@@ -19,6 +20,7 @@ app.use(express.json())
 
 const PORT = process.env.PORT || 3001
 const aai = new AssemblyAI({ apiKey: "cebb6f1cb4ff45859bec0510b9d92c0f" })
+const anthropic = new Anthropic({ apiKey: "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" })
 
 const upload = multer({
   dest: "/tmp/uploads/",
@@ -137,18 +139,64 @@ async function processVideo({ jobId, videoUrls, videoPaths, prompt, options, mus
       } catch (e) { console.error("Erreur transcription:", e.message) }
     }
 
-    jobs[jobId].progress = 50
+    jobs[jobId].progress = 45
 
-    const durations = [
+    // Analyse IA
+    let durations = [
       { start: 0, duration: 15, name: "clip1" },
       { start: 5, duration: 20, name: "clip2" },
       { start: 10, duration: 25, name: "clip3" },
     ]
 
+    try {
+      const { stdout: durationStr } = await execAsync(`ffprobe -v quiet -show_entries format=duration -of csv=p=0 "${mainInput}"`)
+      const totalDuration = parseFloat(durationStr.trim())
+
+      const aiResponse = await anthropic.messages.create({
+        model: "claude-sonnet-4-5",
+        max_tokens: 1000,
+        messages: [{
+          role: "user",
+          content: `Tu es un éditeur vidéo expert en edits TikTok style foot/sport.
+
+La vidéo fait ${Math.round(totalDuration)} secondes au total.
+Prompt de l'utilisateur: "${prompt || "fais des edits dynamiques"}"
+Options activées: ${(options || []).join(", ")}
+
+Génère 3 clips parfaits pour TikTok. Réponds UNIQUEMENT avec un JSON valide, rien d'autre:
+[
+  {"start": 0, "duration": 15, "name": "Edit #1"},
+  {"start": 10, "duration": 20, "name": "Edit #2"},
+  {"start": 25, "duration": 12, "name": "Edit #3"}
+]
+
+Règles:
+- start + duration ne doit pas dépasser ${Math.round(totalDuration)}
+- durées entre 10 et 30 secondes
+- varie les moments pour couvrir toute la vidéo
+- si le prompt mentionne un joueur ou action spécifique, adapte les timestamps`
+        }]
+      })
+
+      const aiText = aiResponse.content[0].type === "text" ? aiResponse.content[0].text : ""
+      const parsed = JSON.parse(aiText.trim())
+      if (Array.isArray(parsed) && parsed.length > 0) {
+        durations = parsed.map((d, i) => ({
+          start: Math.max(0, Math.min(d.start, totalDuration - d.duration)),
+          duration: Math.min(d.duration, totalDuration),
+          name: d.name || `Edit #${i + 1}`
+        }))
+      }
+    } catch (e) {
+      console.error("Erreur analyse IA:", e.message)
+    }
+
+    jobs[jobId].progress = 50
+
     for (let ci = 0; ci < durations.length; ci++) {
       const clip = durations[ci]
-      const outputPath = path.join(tmpDir, `${clip.name}_${Date.now()}.mp4`)
-      const srtPath = path.join(tmpDir, `${clip.name}_${Date.now()}.srt`)
+      const outputPath = path.join(tmpDir, `clip_${ci}_${Date.now()}.mp4`)
+      const srtPath = path.join(tmpDir, `clip_${ci}_${Date.now()}.srt`)
 
       if (subtitles.length > 0) {
         const clipSubs = subtitles.filter(s => s.start >= clip.start && s.start < clip.start + clip.duration)
@@ -195,7 +243,7 @@ async function processVideo({ jobId, videoUrls, videoPaths, prompt, options, mus
 
       const fileBuffer = fs.readFileSync(outputPath)
       const base64 = fileBuffer.toString("base64")
-      clips.push({ name: `Edit #${clips.length + 1}`, base64: `data:video/mp4;base64,${base64}`, duration: clip.duration })
+      clips.push({ name: clip.name || `Edit #${ci + 1}`, base64: `data:video/mp4;base64,${base64}`, duration: clip.duration })
       fs.unlinkSync(outputPath)
       jobs[jobId].progress = 50 + Math.floor((ci + 1) / durations.length * 50)
     }
