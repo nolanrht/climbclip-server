@@ -70,6 +70,8 @@ app.post("/generate", async (req, res) => {
   if (!videoUrls?.length && !videoPaths?.length) return res.status(400).json({ error: "Aucune vidéo" })
   const jobId = `job_${Date.now()}`
   jobs[jobId] = { status: "processing", progress: 0, clips: null, error: null }
+  console.log("videoPaths reçus:", videoPaths)
+console.log("videoUrls reçus:", videoUrls)
   res.json({ jobId })
   processVideo({ jobId, videoUrls, videoPaths, prompt, options, musicUrl })
 })
@@ -87,6 +89,8 @@ async function processVideo({ jobId, videoUrls, videoPaths, prompt, options, mus
 
   try {
     jobs[jobId] = { status: "processing", progress: 5, clips: null, error: null }
+    console.log("videoPaths reçus:", videoPaths)
+console.log("videoUrls reçus:", videoUrls)
 
     for (let i = 0; i < (videoUrls || []).length; i++) {
       const url = videoUrls[i]
