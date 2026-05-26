@@ -6,11 +6,11 @@ const axios = require("axios")
 const fs = require("fs")
 const path = require("path")
 const multer = require("multer")
-const { AssemblyAI } = require("assemblyai")
+const aai = new AssemblyAI({ apiKey: process.env.ASSEMBLYAI_API_KEY })
 const { exec } = require("child_process")
 const { promisify } = require("util")
 const execAsync = promisify(exec)
-const Anthropic = require("@anthropic-ai/sdk")
+const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY })
 
 ffmpeg.setFfmpegPath(ffmpegPath)
 
