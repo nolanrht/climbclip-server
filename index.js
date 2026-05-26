@@ -45,7 +45,7 @@ app.post("/download", async (req, res) => {
 
   try {
     console.log("Téléchargement:", url)
-    await execAsync(`yt-dlp --js-interpreter node -f "best[ext=mp4]/best" -o "${outputPath}" "${url}"`)
+    await execAsync(`yt-dlp --extractor-args "youtube:player_client=android" -f "best[ext=mp4]/best" -o "${outputPath}" "${url}"`)
     console.log("Téléchargé:", outputPath)
     res.json({ path: outputPath })
   } catch (err) {
