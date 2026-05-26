@@ -33,10 +33,40 @@ app.get("/health", (req, res) => {
   res.json({ status: "ok" })
 })
 
-app.post("/upload", upload.single("file"), async (req, res) => {
-  if (!req.file) return res.status(400).json({ error: "Aucun fichier" })
-  console.log("Fichier reçu:", req.file.path)
-  res.json({ path: req.file.path })
+app.post("/download", async (req, res) => {
+  const { url } = req.body
+  if (!url) return res.status(400).json({ error: "URL requise" })
+  const outputPath = path.join("/tmp", `yt_${Date.now()}.mp4`)
+  try {
+    console.log("Téléchargement via Cobalt:", url)
+    const cobaltRes = await axios.post("https://api.cobalt.tools/", {
+      url,
+      videoQuality: "720",
+      filenameStyle: "basic"
+    }, {
+      headers: {
+        "Accept": "application/json",
+        "Content-Type": "application/json"
+      }
+    })
+    
+    const downloadUrl = cobaltRes.data.url
+    if (!downloadUrl) throw new Error("Pas d'URL de téléchargement")
+    
+    const response = await axios({ url: downloadUrl, method: "GET", responseType: "stream" })
+    const writer = fs.createWriteStream(outputPath)
+    response.data.pipe(writer)
+    await new Promise((resolve, reject) => {
+      writer.on("finish", resolve)
+      writer.on("error", reject)
+    })
+    
+    console.log("Téléchargé:", outputPath)
+    res.json({ path: outputPath })
+  } catch (err) {
+    console.error("Erreur download:", err.message)
+    res.status(500).json({ error: err.message })
+  }
 })
 
 app.post("/download", async (req, res) => {
