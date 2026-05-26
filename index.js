@@ -40,9 +40,7 @@ app.post("/upload", upload.single("file"), async (req, res) => {
 app.post("/download", async (req, res) => {
   const { url } = req.body
   if (!url) return res.status(400).json({ error: "URL requise" })
-
   const outputPath = path.join("/tmp", `yt_${Date.now()}.mp4`)
-
   try {
     console.log("Téléchargement:", url)
     await execAsync(`yt-dlp --extractor-args "youtube:player_client=android" -f "best[ext=mp4]/best" -o "${outputPath}" "${url}"`)
@@ -54,17 +52,24 @@ app.post("/download", async (req, res) => {
   }
 })
 
+app.post("/thumbnail", async (req, res) => {
+  const { url } = req.body
+  if (!url) return res.status(400).json({ error: "URL requise" })
+  try {
+    const { stdout } = await execAsync(`yt-dlp --get-thumbnail "${url}"`)
+    res.json({ thumbnail: stdout.trim() })
+  } catch {
+    res.json({ thumbnail: null })
+  }
+})
+
 app.post("/generate", async (req, res) => {
-  const { videoUrl, videoPath, prompt, options, musicUrl } = req.body
-  console.log("Generate appelé - videoPath:", videoPath, "videoUrl:", videoUrl)
-
-  if (!videoUrl && !videoPath) return res.status(400).json({ error: "videoUrl ou videoPath requis" })
-
+  const { videoUrls, videoPaths, prompt, options, musicUrl } = req.body
+  if (!videoUrls?.length && !videoPaths?.length) return res.status(400).json({ error: "Aucune vidéo" })
   const jobId = `job_${Date.now()}`
-  jobs[jobId] = { status: "processing", clips: null, error: null }
+  jobs[jobId] = { status: "processing", progress: 0, clips: null, error: null }
   res.json({ jobId })
-
-  processVideo({ jobId, videoUrl, videoPath, prompt, options, musicUrl })
+  processVideo({ jobId, videoUrls, videoPaths, prompt, options, musicUrl })
 })
 
 app.get("/status/:jobId", (req, res) => {
@@ -73,43 +78,66 @@ app.get("/status/:jobId", (req, res) => {
   res.json(job)
 })
 
-async function processVideo({ jobId, videoUrl, videoPath, prompt, options, musicUrl }) {
+async function processVideo({ jobId, videoUrls, videoPaths, prompt, options, musicUrl }) {
   const tmpDir = "/tmp"
-  const inputPath = videoPath || path.join(tmpDir, `input_${Date.now()}.mp4`)
-  let downloadedFile = false
+  const inputPaths = []
+  const clips = []
 
   try {
-    if (videoUrl && !videoPath) {
-      downloadedFile = true
-      const response = await axios({ url: videoUrl, method: "GET", responseType: "stream" })
+    jobs[jobId] = { status: "processing", progress: 5, clips: null, error: null }
+
+    for (let i = 0; i < (videoUrls || []).length; i++) {
+      const url = videoUrls[i]
+      const inputPath = path.join(tmpDir, `input_${Date.now()}_${i}.mp4`)
+      const response = await axios({ url, method: "GET", responseType: "stream" })
       const writer = fs.createWriteStream(inputPath)
       response.data.pipe(writer)
       await new Promise((resolve, reject) => {
         writer.on("finish", resolve)
         writer.on("error", reject)
       })
+      inputPaths.push(inputPath)
+      jobs[jobId].progress = 10 + Math.floor((i + 1) / (videoUrls.length) * 20)
     }
+
+    for (const p of (videoPaths || [])) {
+      if (fs.existsSync(p)) inputPaths.push(p)
+    }
+
+    jobs[jobId].progress = 30
+
+    let mainInput = inputPaths[0]
+    if (inputPaths.length > 1) {
+      const listPath = path.join(tmpDir, `list_${Date.now()}.txt`)
+      const concatPath = path.join(tmpDir, `concat_${Date.now()}.mp4`)
+      fs.writeFileSync(listPath, inputPaths.map(p => `file '${p}'`).join("\n"))
+      await new Promise((resolve, reject) => {
+        ffmpeg()
+          .input(listPath)
+          .inputOptions(["-f", "concat", "-safe", "0"])
+          .outputOptions(["-c copy"])
+          .output(concatPath)
+          .on("end", () => resolve(concatPath))
+          .on("error", reject)
+          .run()
+      })
+      mainInput = concatPath
+      fs.unlinkSync(listPath)
+    }
+
+    jobs[jobId].progress = 40
 
     let subtitles = []
     if (options?.includes("Sous-titres")) {
-      console.log("Transcription en cours...")
       try {
-        const transcript = await aai.transcripts.transcribe({
-          audio: videoUrl || inputPath,
-          language_detection: true
-        })
+        const transcript = await aai.transcripts.transcribe({ audio: mainInput, language_detection: true })
         if (transcript.words) {
-          subtitles = transcript.words.map(w => ({
-            text: w.text,
-            start: w.start / 1000,
-            end: w.end / 1000,
-          }))
+          subtitles = transcript.words.map(w => ({ text: w.text, start: w.start / 1000, end: w.end / 1000 }))
         }
-        console.log("Transcription terminée:", subtitles.length, "mots")
-      } catch (e) {
-        console.error("Erreur transcription:", e.message)
-      }
+      } catch (e) { console.error("Erreur transcription:", e.message) }
     }
+
+    jobs[jobId].progress = 50
 
     const durations = [
       { start: 0, duration: 15, name: "clip1" },
@@ -117,9 +145,8 @@ async function processVideo({ jobId, videoUrl, videoPath, prompt, options, music
       { start: 10, duration: 25, name: "clip3" },
     ]
 
-    const clips = []
-
-    for (const clip of durations) {
+    for (let ci = 0; ci < durations.length; ci++) {
+      const clip = durations[ci]
       const outputPath = path.join(tmpDir, `${clip.name}_${Date.now()}.mp4`)
       const srtPath = path.join(tmpDir, `${clip.name}_${Date.now()}.srt`)
 
@@ -144,20 +171,17 @@ async function processVideo({ jobId, videoUrl, videoPath, prompt, options, music
       }
 
       await new Promise((resolve, reject) => {
-        let cmd = ffmpeg(inputPath)
+        let cmd = ffmpeg(mainInput)
           .setStartTime(clip.start)
           .setDuration(clip.duration)
           .outputOptions(["-c:v libx264", "-c:a aac", "-movflags faststart"])
 
         if (subtitles.length > 0 && fs.existsSync(srtPath)) {
-          cmd = cmd.outputOptions([
-            `-vf subtitles=${srtPath}:force_style='FontSize=18,PrimaryColour=&HFFFFFF,OutlineColour=&H000000,Outline=2,Alignment=2'`
-          ])
+          cmd = cmd.outputOptions([`-vf subtitles=${srtPath}:force_style='FontSize=18,PrimaryColour=&HFFFFFF,OutlineColour=&H000000,Outline=2,Alignment=2'`])
         }
 
         cmd.output(outputPath)
           .on("end", () => {
-            console.log(`Clip ${clip.name} généré`)
             if (fs.existsSync(srtPath)) fs.unlinkSync(srtPath)
             resolve(outputPath)
           })
@@ -171,26 +195,19 @@ async function processVideo({ jobId, videoUrl, videoPath, prompt, options, music
 
       const fileBuffer = fs.readFileSync(outputPath)
       const base64 = fileBuffer.toString("base64")
-      clips.push({
-        name: `Edit #${clips.length + 1}`,
-        base64: `data:video/mp4;base64,${base64}`,
-        duration: clip.duration,
-      })
-
+      clips.push({ name: `Edit #${clips.length + 1}`, base64: `data:video/mp4;base64,${base64}`, duration: clip.duration })
       fs.unlinkSync(outputPath)
+      jobs[jobId].progress = 50 + Math.floor((ci + 1) / durations.length * 50)
     }
 
-    if (downloadedFile && fs.existsSync(inputPath)) fs.unlinkSync(inputPath)
-    if (videoPath && fs.existsSync(videoPath)) fs.unlinkSync(videoPath)
+    for (const p of inputPaths) { if (fs.existsSync(p)) try { fs.unlinkSync(p) } catch {} }
 
-    console.log("Génération terminée !")
-    jobs[jobId] = { status: "done", clips }
+    jobs[jobId] = { status: "done", progress: 100, clips }
 
   } catch (err) {
     console.error(err)
-    if (downloadedFile && fs.existsSync(inputPath)) fs.unlinkSync(inputPath)
-    if (videoPath && fs.existsSync(videoPath)) fs.unlinkSync(videoPath)
-    jobs[jobId] = { status: "error", error: err.message }
+    for (const p of inputPaths) { if (fs.existsSync(p)) try { fs.unlinkSync(p) } catch {} }
+    jobs[jobId] = { status: "error", progress: 0, error: err.message }
   }
 }
 
