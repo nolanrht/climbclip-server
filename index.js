@@ -29,13 +29,10 @@ const upload = multer({
 
 const jobs = {}
 
-app.get("/health", (req, res) => {
-  res.json({ status: "ok" })
-})
+app.get("/health", (req, res) => res.json({ status: "ok" }))
 
 app.post("/upload", upload.single("file"), async (req, res) => {
   if (!req.file) return res.status(400).json({ error: "Aucun fichier" })
-  console.log("Fichier reçu:", req.file.path)
   res.json({ path: req.file.path })
 })
 
@@ -46,7 +43,6 @@ app.post("/download", async (req, res) => {
   try {
     console.log("Téléchargement:", url)
     await execAsync(`yt-dlp --cookies /app/cookies.txt -f "best[ext=mp4]/best" -o "${outputPath}" "${url}"`)
-    console.log("Téléchargé:", outputPath)
     res.json({ path: outputPath })
   } catch (err) {
     console.error("Erreur yt-dlp:", err.message)
@@ -78,13 +74,7 @@ app.post("/prompt-help", async (req, res) => {
         { type: "text", text: `Tu es un expert en edits TikTok foot/sport. L'utilisateur veut créer un edit et a fourni des images de référence + cette description: "${description}". Génère un prompt parfait et détaillé pour générer cet edit. Réponds uniquement avec le prompt, rien d'autre.` }
       ] : [{ type: "text", text: `Tu es un expert en edits TikTok foot/sport. L'utilisateur veut: "${description}". Génère un prompt parfait et détaillé pour générer cet edit. Réponds uniquement avec le prompt, rien d'autre.` }]
     }]
-
-    const response = await anthropic.messages.create({
-      model: "claude-sonnet-4-5",
-      max_tokens: 500,
-      messages
-    })
-
+    const response = await anthropic.messages.create({ model: "claude-sonnet-4-5", max_tokens: 500, messages })
     res.json({ prompt: response.content[0].type === "text" ? response.content[0].text : "" })
   } catch (err) {
     res.status(500).json({ error: err.message })
@@ -96,8 +86,6 @@ app.post("/generate", async (req, res) => {
   if (!videoUrls?.length && !videoPaths?.length) return res.status(400).json({ error: "Aucune vidéo" })
   const jobId = `job_${Date.now()}`
   jobs[jobId] = { status: "processing", progress: 0, clips: null, error: null }
-  console.log("videoPaths reçus:", videoPaths)
-  console.log("videoUrls reçus:", videoUrls)
   res.json({ jobId })
   processVideo({ jobId, videoUrls, videoPaths, prompt, options, musicUrl })
 })
@@ -108,6 +96,97 @@ app.get("/status/:jobId", (req, res) => {
   res.json(job)
 })
 
+async function analyzeEffects(prompt, totalDuration, options) {
+  try {
+    const needsZoom = options?.includes("Auto-zoom")
+    const needsSpeedRamp = options?.includes("Speed ramp")
+    if (!needsZoom && !needsSpeedRamp) return null
+
+    const response = await anthropic.messages.create({
+      model: "claude-sonnet-4-5",
+      max_tokens: 800,
+      messages: [{
+        role: "user",
+        content: `Tu es un expert en montage vidéo TikTok/sport. Analyse ce prompt: "${prompt || "edit dynamique sport"}"
+La vidéo fait ${Math.round(totalDuration)} secondes.
+Options activées: ${options?.join(", ")}
+
+Génère les paramètres d'effets optimaux. Réponds UNIQUEMENT avec du JSON brut sans backticks:
+{
+  "autozoom": {
+    "enabled": ${needsZoom},
+    "intensity": 1.15,
+    "zoom_points": [
+      {"time": 0, "scale": 1.0},
+      {"time": 0.3, "scale": 1.15},
+      {"time": 0.7, "scale": 1.05},
+      {"time": 1.0, "scale": 1.0}
+    ]
+  },
+  "speedramp": {
+    "enabled": ${needsSpeedRamp},
+    "segments": [
+      {"start_pct": 0, "end_pct": 0.2, "speed": 1.5},
+      {"start_pct": 0.2, "end_pct": 0.5, "speed": 0.7},
+      {"start_pct": 0.5, "end_pct": 0.8, "speed": 1.8},
+      {"start_pct": 0.8, "end_pct": 1.0, "speed": 1.0}
+    ]
+  }
+}
+
+Règles:
+- Pour un edit dynamique/sport/foot: zoom entre 1.05 et 1.25, speed entre 0.5 et 2.5
+- Pour un edit chill/slow: zoom entre 1.02 et 1.1, speed entre 0.5 et 1.2
+- Pour des capsules: zoom léger 1.05-1.1, speed stable 1.0
+- Adapte l'intensité selon le style demandé dans le prompt`
+      }]
+    })
+
+    const text = response.content[0].type === "text" ? response.content[0].text : ""
+    const clean = text.replace(/```json\n?/g, "").replace(/```\n?/g, "").trim()
+    return JSON.parse(clean)
+  } catch (e) {
+    console.error("Erreur analyse effets:", e.message)
+    return null
+  }
+}
+
+function buildVideoFilters(clipDuration, effects, subtitles, srtPath) {
+  const filters = []
+
+  if (effects?.speedramp?.enabled && effects.speedramp.segments?.length > 0) {
+    const segments = effects.speedramp.segments
+    let setptsFilter = "setpts="
+    const ptsSegments = segments.map((seg, i) => {
+      const startSec = seg.start_pct * clipDuration
+      const endSec = seg.end_pct * clipDuration
+      const speed = Math.max(0.25, Math.min(4.0, seg.speed))
+      if (i === 0) {
+        return `if(between(T,${startSec.toFixed(2)},${endSec.toFixed(2)}),${(1/speed).toFixed(3)}*PTS`
+      } else if (i === segments.length - 1) {
+        return `if(between(T,${startSec.toFixed(2)},${endSec.toFixed(2)}),${(1/speed).toFixed(3)}*PTS,PTS)${")"
+          .repeat(segments.length - 1)}`
+      } else {
+        return `if(between(T,${startSec.toFixed(2)},${endSec.toFixed(2)}),${(1/speed).toFixed(3)}*PTS`
+      }
+    })
+    filters.push(`${setptsFilter}${ptsSegments.join(",")}`)
+  }
+
+  if (effects?.autozoom?.enabled && effects.autozoom.zoom_points?.length > 0) {
+    const zoomPts = effects.autozoom.zoom_points
+    const maxScale = effects.autozoom.intensity || 1.15
+    const zoompanExpr = `scale=iw*${maxScale.toFixed(3)}:ih*${maxScale.toFixed(3)},crop=iw/${maxScale.toFixed(3)}:ih/${maxScale.toFixed(3)}`
+    filters.push(zoompanExpr)
+  }
+
+  if (subtitles.length > 0 && srtPath && fs.existsSync(srtPath)) {
+    filters.push(`subtitles=${srtPath}:force_style='FontSize=18,PrimaryColour=&HFFFFFF,OutlineColour=&H000000,Outline=2,Alignment=2'`)
+  }
+
+  return filters
+}
+
 async function processVideo({ jobId, videoUrls, videoPaths, prompt, options, musicUrl }) {
   const tmpDir = "/tmp"
   const inputPaths = []
@@ -115,8 +194,6 @@ async function processVideo({ jobId, videoUrls, videoPaths, prompt, options, mus
 
   try {
     jobs[jobId] = { status: "processing", progress: 5, clips: null, error: null }
-    console.log("videoPaths reçus:", videoPaths)
-    console.log("videoUrls reçus:", videoUrls)
 
     for (let i = 0; i < (videoUrls || []).length; i++) {
       const url = videoUrls[i]
@@ -124,10 +201,7 @@ async function processVideo({ jobId, videoUrls, videoPaths, prompt, options, mus
       const response = await axios({ url, method: "GET", responseType: "stream" })
       const writer = fs.createWriteStream(inputPath)
       response.data.pipe(writer)
-      await new Promise((resolve, reject) => {
-        writer.on("finish", resolve)
-        writer.on("error", reject)
-      })
+      await new Promise((resolve, reject) => { writer.on("finish", resolve); writer.on("error", reject) })
       inputPaths.push(inputPath)
       jobs[jobId].progress = 10 + Math.floor((i + 1) / videoUrls.length * 20)
     }
@@ -157,7 +231,7 @@ async function processVideo({ jobId, videoUrls, videoPaths, prompt, options, mus
       fs.unlinkSync(listPath)
     }
 
-    jobs[jobId].progress = 40
+    jobs[jobId].progress = 35
 
     let musicPath = null
     if (musicUrl) {
@@ -166,15 +240,8 @@ async function processVideo({ jobId, videoUrls, videoPaths, prompt, options, mus
         const musicResponse = await axios({ url: musicUrl, method: "GET", responseType: "stream" })
         const musicWriter = fs.createWriteStream(musicPath)
         musicResponse.data.pipe(musicWriter)
-        await new Promise((resolve, reject) => {
-          musicWriter.on("finish", resolve)
-          musicWriter.on("error", reject)
-        })
-        console.log("Musique téléchargée:", musicPath)
-      } catch (e) {
-        console.error("Erreur téléchargement musique:", e.message)
-        musicPath = null
-      }
+        await new Promise((resolve, reject) => { musicWriter.on("finish", resolve); musicWriter.on("error", reject) })
+      } catch (e) { console.error("Erreur musique:", e.message); musicPath = null }
     }
 
     let subtitles = []
@@ -187,6 +254,13 @@ async function processVideo({ jobId, videoUrls, videoPaths, prompt, options, mus
       } catch (e) { console.error("Erreur transcription:", e.message) }
     }
 
+    jobs[jobId].progress = 40
+
+    const { stdout: durationStr } = await execAsync(`ffprobe -v quiet -show_entries format=duration -of csv=p=0 "${mainInput}"`)
+    const totalDuration = parseFloat(durationStr.trim())
+
+    // Analyse IA pour les effets (auto-zoom + speed ramp)
+    const effects = await analyzeEffects(prompt, totalDuration, options)
     jobs[jobId].progress = 45
 
     let durations = [
@@ -196,39 +270,22 @@ async function processVideo({ jobId, videoUrls, videoPaths, prompt, options, mus
     ]
 
     try {
-      const { stdout: durationStr } = await execAsync(`ffprobe -v quiet -show_entries format=duration -of csv=p=0 "${mainInput}"`)
-      const totalDuration = parseFloat(durationStr.trim())
-
       const aiResponse = await anthropic.messages.create({
         model: "claude-sonnet-4-5",
         max_tokens: 1000,
         messages: [{
           role: "user",
           content: `Tu es un éditeur vidéo expert en edits TikTok style foot/sport.
-
 La vidéo fait ${Math.round(totalDuration)} secondes au total.
-Prompt de l'utilisateur: "${prompt || "fais des edits dynamiques"}"
-
-Analyse le prompt et détermine le nombre de clips demandés (par défaut 3 si non précisé).
-Génère exactement ce nombre de clips. Réponds UNIQUEMENT avec un JSON valide sans backticks ni markdown, juste le tableau JSON brut:
-[
-  {"start": 0, "duration": 15, "name": "Edit #1"},
-  {"start": 20, "duration": 18, "name": "Edit #2"},
-  {"start": 45, "duration": 12, "name": "Edit #3"}
-]
-
-Règles:
-- start + duration ne doit pas dépasser ${Math.round(totalDuration)}
-- durées entre 10 et 30 secondes
-- varie les moments pour couvrir toute la vidéo
-- si le prompt mentionne un joueur ou action spécifique, adapte les timestamps
-- si le prompt dit "1 clip" ou "un clip" génère un seul objet dans le tableau`
+Prompt: "${prompt || "fais des edits dynamiques"}"
+Analyse le prompt et détermine le nombre de clips. Réponds UNIQUEMENT avec un JSON valide sans backticks:
+[{"start": 0, "duration": 15, "name": "Edit #1"}]
+Règles: start+duration <= ${Math.round(totalDuration)}, durées 10-30s, couvre toute la vidéo, si "1 clip" génère un seul objet`
         }]
       })
 
       const aiText = aiResponse.content[0].type === "text" ? aiResponse.content[0].text : ""
-      const cleanText = aiText.replace(/```json\n?/g, "").replace(/```\n?/g, "").trim()
-      const parsed = JSON.parse(cleanText)
+      const parsed = JSON.parse(aiText.replace(/```json\n?/g, "").replace(/```\n?/g, "").trim())
       if (Array.isArray(parsed) && parsed.length > 0) {
         durations = parsed.map((d, i) => ({
           start: Math.max(0, Math.min(d.start, totalDuration - d.duration)),
@@ -236,9 +293,7 @@ Règles:
           name: d.name || `Edit #${i + 1}`
         }))
       }
-    } catch (e) {
-      console.error("Erreur analyse IA:", e.message)
-    }
+    } catch (e) { console.error("Erreur analyse IA clips:", e.message) }
 
     jobs[jobId].progress = 50
 
@@ -247,52 +302,64 @@ Règles:
       const outputPath = path.join(tmpDir, `clip_${ci}_${Date.now()}.mp4`)
       const srtPath = path.join(tmpDir, `clip_${ci}_${Date.now()}.srt`)
 
+      // Générer SRT si sous-titres
+      let hasSrt = false
       if (subtitles.length > 0) {
         const clipSubs = subtitles.filter(s => s.start >= clip.start && s.start < clip.start + clip.duration)
         if (clipSubs.length > 0) {
+          const toSrtTime = (t) => {
+            const h = Math.floor(t / 3600).toString().padStart(2, "0")
+            const m = Math.floor((t % 3600) / 60).toString().padStart(2, "0")
+            const s2 = Math.floor(t % 60).toString().padStart(2, "0")
+            const ms = Math.floor((t % 1) * 1000).toString().padStart(3, "0")
+            return `${h}:${m}:${s2},${ms}`
+          }
           let srtContent = ""
           clipSubs.forEach((s, i) => {
-            const startTime = s.start - clip.start
-            const endTime = s.end - clip.start
-            const toSrtTime = (t) => {
-              const h = Math.floor(t / 3600).toString().padStart(2, "0")
-              const m = Math.floor((t % 3600) / 60).toString().padStart(2, "0")
-              const s2 = Math.floor(t % 60).toString().padStart(2, "0")
-              const ms = Math.floor((t % 1) * 1000).toString().padStart(3, "0")
-              return `${h}:${m}:${s2},${ms}`
-            }
-            srtContent += `${i + 1}\n${toSrtTime(startTime)} --> ${toSrtTime(endTime)}\n${s.text}\n\n`
+            srtContent += `${i + 1}\n${toSrtTime(s.start - clip.start)} --> ${toSrtTime(s.end - clip.start)}\n${s.text}\n\n`
           })
           fs.writeFileSync(srtPath, srtContent)
+          hasSrt = true
         }
       }
+
+      // Construire les filtres vidéo
+      const videoFilters = buildVideoFilters(clip.duration, effects, subtitles, hasSrt ? srtPath : null)
 
       await new Promise((resolve, reject) => {
         let cmd = ffmpeg(mainInput)
           .setStartTime(clip.start)
           .setDuration(clip.duration)
-          .outputOptions(["-c:v libx264", "-movflags faststart"])
+
+        const outputOpts = ["-movflags faststart"]
+
+        if (videoFilters.length > 0) {
+          outputOpts.push(`-vf ${videoFilters.join(",")}`)
+          outputOpts.push("-c:v libx264")
+          // Speed ramp nécessite re-encode audio aussi
+          if (effects?.speedramp?.enabled) {
+            outputOpts.push("-af atempo=1.0")
+          }
+        } else {
+          outputOpts.push("-c:v libx264")
+        }
 
         if (musicPath && fs.existsSync(musicPath)) {
-          cmd = cmd
-            .input(musicPath)
-            .outputOptions(["-c:a aac", "-map 0:v:0", "-map 1:a:0", "-shortest"])
+          cmd = cmd.input(musicPath)
+          outputOpts.push("-c:a aac", "-map 0:v:0", "-map 1:a:0", "-shortest")
         } else {
-          cmd = cmd.outputOptions(["-c:a aac"])
+          outputOpts.push("-c:a aac")
         }
 
-        if (subtitles.length > 0 && fs.existsSync(srtPath)) {
-          cmd = cmd.outputOptions([`-vf subtitles=${srtPath}:force_style='FontSize=18,PrimaryColour=&HFFFFFF,OutlineColour=&H000000,Outline=2,Alignment=2'`])
-        }
-
-        cmd.output(outputPath)
+        cmd.outputOptions(outputOpts)
+          .output(outputPath)
           .on("end", () => {
-            if (fs.existsSync(srtPath)) fs.unlinkSync(srtPath)
+            if (hasSrt && fs.existsSync(srtPath)) fs.unlinkSync(srtPath)
             resolve(outputPath)
           })
           .on("error", (err, stdout, stderr) => {
             console.error("FFmpeg stderr:", stderr)
-            if (fs.existsSync(srtPath)) fs.unlinkSync(srtPath)
+            if (hasSrt && fs.existsSync(srtPath)) try { fs.unlinkSync(srtPath) } catch {}
             reject(err)
           })
           .run()
