@@ -22,8 +22,9 @@ app.use(express.json({ limit: "50mb" }))
 const PORT = process.env.PORT || 3001
 const aai = new AssemblyAI({ apiKey: process.env.ASSEMBLYAI_API_KEY })
 const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY })
-const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_KEY)
-
+const supabase = process.env.SUPABASE_URL && process.env.SUPABASE_SERVICE_KEY
+  ? createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_KEY)
+  : null
 const upload = multer({ dest: "/tmp/uploads/", limits: { fileSize: 2 * 1024 * 1024 * 1024 } })
 const jobs = {}
 
@@ -58,8 +59,7 @@ app.post("/thumbnail", async (req, res) => {
 
 // ─── ROUTE PARTAGE DIRECT ─────────────────────────────────────────────────
 app.post("/share", async (req, res) => {
-  const { base64, name } = req.body
-  if (!base64) return res.status(400).json({ error: "base64 requis" })
+  if (!supabase) return res.status(503).json({ error: "Supabase non configuré" })
   try {
     const data = base64.includes(",") ? base64.split(",")[1] : base64
     const buffer = Buffer.from(data, "base64")
