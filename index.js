@@ -9,6 +9,7 @@ const multer = require("multer")
 const { AssemblyAI } = require("assemblyai")
 const Anthropic = require("@anthropic-ai/sdk")
 const { createClient } = require("@supabase/supabase-js")
+const ws = require("ws")
 const { exec } = require("child_process")
 const { promisify } = require("util")
 const execAsync = promisify(exec)
@@ -23,8 +24,11 @@ const PORT = process.env.PORT || 3001
 const aai = new AssemblyAI({ apiKey: process.env.ASSEMBLYAI_API_KEY })
 const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY })
 const supabase = process.env.SUPABASE_URL && process.env.SUPABASE_SERVICE_KEY
-  ? createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_KEY)
+  ? createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_KEY, {
+      realtime: { transport: ws }
+    })
   : null
+
 const upload = multer({ dest: "/tmp/uploads/", limits: { fileSize: 2 * 1024 * 1024 * 1024 } })
 const jobs = {}
 
@@ -57,9 +61,10 @@ app.post("/thumbnail", async (req, res) => {
   } catch { res.json({ thumbnail: null }) }
 })
 
-// ─── ROUTE PARTAGE DIRECT ─────────────────────────────────────────────────
 app.post("/share", async (req, res) => {
   if (!supabase) return res.status(503).json({ error: "Supabase non configuré" })
+  const { base64, name } = req.body
+  if (!base64) return res.status(400).json({ error: "base64 requis" })
   try {
     const data = base64.includes(",") ? base64.split(",")[1] : base64
     const buffer = Buffer.from(data, "base64")
@@ -122,15 +127,11 @@ app.get("/status/:jobId", (req, res) => {
 
 function getQualitySettings(exportQuality, exportCodec) {
   const qualityMap = {
-    "720p":  { scale: "1280:720",   crf: 26, bitrate: 3000 },
-    "1080p": { scale: "1920:1080",  crf: 22, bitrate: 5000 },
-    "4K":    { scale: "3840:2160",  crf: 18, bitrate: 12000 },
+    "720p":  { scale: "1280:720",  crf: 26, bitrate: 3000 },
+    "1080p": { scale: "1920:1080", crf: 22, bitrate: 5000 },
+    "4K":    { scale: "3840:2160", crf: 18, bitrate: 12000 },
   }
-  const codecMap = {
-    "H264": "libx264",
-    "H265": "libx265",
-    "VP9":  "libvpx-vp9",
-  }
+  const codecMap = { "H264": "libx264", "H265": "libx265", "VP9": "libvpx-vp9" }
   const q = qualityMap[exportQuality] || qualityMap["1080p"]
   const codec = codecMap[exportCodec] || "libx264"
   return { ...q, codec }
@@ -139,7 +140,6 @@ function getQualitySettings(exportQuality, exportCodec) {
 function getFormatFilter(format, scale) {
   const formats = { "9:16": { w: 1080, h: 1920 }, "16:9": { w: 1920, h: 1080 }, "1:1": { w: 1080, h: 1080 }, "4:5": { w: 1080, h: 1350 } }
   const target = formats[format] || formats["9:16"]
-  // If custom scale (quality override), use that
   if (scale) {
     const [sw, sh] = scale.split(":").map(Number)
     return `scale=${sw}:${sh}:force_original_aspect_ratio=decrease,pad=${sw}:${sh}:(ow-iw)/2:(oh-ih)/2:black`
@@ -162,11 +162,11 @@ function getColorGradeFilter(grade) {
 
 function getNativeMetadata() {
   const devices = [
-    { make: "Apple",   model: "iPhone 15 Pro",     software: "17.0" },
-    { make: "Apple",   model: "iPhone 14",          software: "16.6" },
-    { make: "Samsung", model: "Galaxy S23",         software: "13" },
-    { make: "Samsung", model: "Galaxy S22 Ultra",   software: "12" },
-    { make: "Google",  model: "Pixel 8 Pro",        software: "14" },
+    { make: "Apple",   model: "iPhone 15 Pro",   software: "17.0" },
+    { make: "Apple",   model: "iPhone 14",        software: "16.6" },
+    { make: "Samsung", model: "Galaxy S23",       software: "13" },
+    { make: "Samsung", model: "Galaxy S22 Ultra", software: "12" },
+    { make: "Google",  model: "Pixel 8 Pro",      software: "14" },
   ]
   const device = devices[Math.floor(Math.random() * devices.length)]
   const now = new Date()
@@ -398,10 +398,8 @@ async function processVideo({ jobId, videoUrls, videoPaths, prompt, options, mus
         }
       }
 
-      // ─ BUILD VIDEO FILTER CHAIN ─
       const vfFilters = []
 
-      // 1. Speed ramp
       let atempoVal = "1.0"
       if (effects?.speedramp?.enabled && effects.speedramp.segments?.length > 0) {
         const avgSpeed = effects.speedramp.segments.reduce((s, seg) => s + seg.speed, 0) / effects.speedramp.segments.length
@@ -410,45 +408,33 @@ async function processVideo({ jobId, videoUrls, videoPaths, prompt, options, mus
         atempoVal = clampedSpeed.toFixed(2)
       }
 
-      // 2. Format/letterbox + quality scale
       vfFilters.push(formatFilter)
 
-      // 3. Auto-zoom
       if (effects?.autozoom?.enabled) {
         const intensity = Math.min(effects.autozoom.intensity || 1.15, 1.3)
         vfFilters.push(`scale=iw*${intensity.toFixed(3)}:ih*${intensity.toFixed(3)},crop=iw/${intensity.toFixed(3)}:ih/${intensity.toFixed(3)}`)
       }
 
-      // 4. Color grade
       const gradeFilter = getColorGradeFilter(colorGrade)
       if (gradeFilter) vfFilters.push(gradeFilter)
 
-      // 5. Film grain
       vfFilters.push(`noise=alls=4:allf=t+u`)
-
-      // 6. Vignette
       vfFilters.push(`vignette=PI/5`)
 
-      // 7. Transition
       const transFilter = buildTransitionFilter(transition, clip.duration)
       if (transFilter) vfFilters.push(transFilter)
 
-      // 8. Text overlay
       const textFilter = buildTextOverlayFilter(textOverlay, clip.duration, targetFormat)
       if (textFilter) vfFilters.push(textFilter)
 
-      // 9. Watermark CLIMB
       if (watermark) vfFilters.push(buildWatermarkFilter(targetFormat))
 
-      // 10. Intro/Outro
       if (addIntroOutro) vfFilters.push(buildIntroOutroFilter(clip.duration, targetFormat))
 
-      // 11. Subtitles
       if (hasSrt) vfFilters.push(`subtitles=${srtPath}:force_style='FontSize=16,PrimaryColour=&HFFFFFF,OutlineColour=&H000000,Outline=2,Alignment=2'`)
 
       const vfString = vfFilters.join(",")
 
-      // ─ AUDIO FILTER ─
       const audioFilters = []
       if (atempoVal !== "1.0") {
         const speed = parseFloat(atempoVal)
