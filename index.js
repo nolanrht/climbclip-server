@@ -8,6 +8,7 @@ const path = require("path")
 const multer = require("multer")
 const { AssemblyAI } = require("assemblyai")
 const Anthropic = require("@anthropic-ai/sdk")
+const { createClient } = require("@supabase/supabase-js")
 const { exec } = require("child_process")
 const { promisify } = require("util")
 const execAsync = promisify(exec)
@@ -16,11 +17,12 @@ ffmpeg.setFfmpegPath(ffmpegPath)
 
 const app = express()
 app.use(cors())
-app.use(express.json())
+app.use(express.json({ limit: "50mb" }))
 
 const PORT = process.env.PORT || 3001
 const aai = new AssemblyAI({ apiKey: process.env.ASSEMBLYAI_API_KEY })
 const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY })
+const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_KEY)
 
 const upload = multer({ dest: "/tmp/uploads/", limits: { fileSize: 2 * 1024 * 1024 * 1024 } })
 const jobs = {}
@@ -54,6 +56,24 @@ app.post("/thumbnail", async (req, res) => {
   } catch { res.json({ thumbnail: null }) }
 })
 
+// ─── ROUTE PARTAGE DIRECT ─────────────────────────────────────────────────
+app.post("/share", async (req, res) => {
+  const { base64, name } = req.body
+  if (!base64) return res.status(400).json({ error: "base64 requis" })
+  try {
+    const data = base64.includes(",") ? base64.split(",")[1] : base64
+    const buffer = Buffer.from(data, "base64")
+    const fileName = `${Date.now()}_${(name || "clip").replace(/\s+/g, "_").replace(/[^a-zA-Z0-9_-]/g, "")}.mp4`
+    const { error } = await supabase.storage.from("clips").upload(fileName, buffer, { contentType: "video/mp4", upsert: true })
+    if (error) throw error
+    const { data: urlData } = supabase.storage.from("clips").getPublicUrl(fileName)
+    res.json({ url: urlData.publicUrl, fileName })
+  } catch (err) {
+    console.error("Share error:", err.message)
+    res.status(500).json({ error: err.message })
+  }
+})
+
 app.post("/preview-timestamps", async (req, res) => {
   const { videoPaths, prompt, options } = req.body
   if (!videoPaths?.length) return res.status(400).json({ error: "Aucune vidéo" })
@@ -84,12 +104,12 @@ app.post("/prompt-help", async (req, res) => {
 })
 
 app.post("/generate", async (req, res) => {
-  const { videoUrls, videoPaths, prompt, options, musicUrl, format, zoomIntensity, speedIntensity, addIntroOutro, customTimestamps, colorGrade, transition, textOverlay, stabilize, vocalVolume } = req.body
+  const { videoUrls, videoPaths, prompt, options, musicUrl, format, zoomIntensity, speedIntensity, addIntroOutro, customTimestamps, colorGrade, transition, textOverlay, stabilize, vocalVolume, watermark, exportQuality, exportCodec } = req.body
   if (!videoUrls?.length && !videoPaths?.length) return res.status(400).json({ error: "Aucune vidéo" })
   const jobId = `job_${Date.now()}`
   jobs[jobId] = { status: "processing", progress: 0, clips: null, error: null }
   res.json({ jobId })
-  processVideo({ jobId, videoUrls, videoPaths, prompt, options, musicUrl, format, zoomIntensity, speedIntensity, addIntroOutro, customTimestamps, colorGrade, transition, textOverlay, stabilize, vocalVolume })
+  processVideo({ jobId, videoUrls, videoPaths, prompt, options, musicUrl, format, zoomIntensity, speedIntensity, addIntroOutro, customTimestamps, colorGrade, transition, textOverlay, stabilize, vocalVolume, watermark, exportQuality, exportCodec })
 })
 
 app.get("/status/:jobId", (req, res) => {
@@ -100,37 +120,57 @@ app.get("/status/:jobId", (req, res) => {
 
 // ─── HELPERS ───────────────────────────────────────────────────────────────
 
-function getFormatFilter(format) {
+function getQualitySettings(exportQuality, exportCodec) {
+  const qualityMap = {
+    "720p":  { scale: "1280:720",   crf: 26, bitrate: 3000 },
+    "1080p": { scale: "1920:1080",  crf: 22, bitrate: 5000 },
+    "4K":    { scale: "3840:2160",  crf: 18, bitrate: 12000 },
+  }
+  const codecMap = {
+    "H264": "libx264",
+    "H265": "libx265",
+    "VP9":  "libvpx-vp9",
+  }
+  const q = qualityMap[exportQuality] || qualityMap["1080p"]
+  const codec = codecMap[exportCodec] || "libx264"
+  return { ...q, codec }
+}
+
+function getFormatFilter(format, scale) {
   const formats = { "9:16": { w: 1080, h: 1920 }, "16:9": { w: 1920, h: 1080 }, "1:1": { w: 1080, h: 1080 }, "4:5": { w: 1080, h: 1350 } }
   const target = formats[format] || formats["9:16"]
+  // If custom scale (quality override), use that
+  if (scale) {
+    const [sw, sh] = scale.split(":").map(Number)
+    return `scale=${sw}:${sh}:force_original_aspect_ratio=decrease,pad=${sw}:${sh}:(ow-iw)/2:(oh-ih)/2:black`
+  }
   return `scale=${target.w}:${target.h}:force_original_aspect_ratio=decrease,pad=${target.w}:${target.h}:(ow-iw)/2:(oh-ih)/2:black`
 }
 
 function getColorGradeFilter(grade) {
   const grades = {
-    "cinematic": "curves=r='0/0 0.2/0.15 0.8/0.9 1/1':g='0/0 0.2/0.18 0.8/0.85 1/1':b='0/0.05 0.5/0.55 1/0.95',eq=saturation=1.2:contrast=1.1",
+    "cinematic":   "curves=r='0/0 0.2/0.15 0.8/0.9 1/1':g='0/0 0.2/0.18 0.8/0.85 1/1':b='0/0.05 0.5/0.55 1/0.95',eq=saturation=1.2:contrast=1.1",
     "orange_teal": "colorchannelmixer=rr=1.1:rb=-0.05:gr=-0.05:gg=0.95:gb=0.1:br=-0.1:bg=0.1:bb=1.15,eq=saturation=1.3",
-    "bw": "hue=s=0,eq=contrast=1.3:brightness=0.05",
-    "vibrant": "eq=saturation=1.6:contrast=1.05:brightness=0.02",
-    "moody": "curves=r='0/0 0.3/0.25 0.7/0.65 1/0.9':g='0/0 0.3/0.27 0.7/0.67 1/0.92':b='0/0.05 0.3/0.32 0.7/0.72 1/1',eq=saturation=0.9:contrast=1.15",
-    "warm": "curves=r='0/0.05 0.5/0.58 1/1':g='0/0 0.5/0.5 1/0.95':b='0/0 0.5/0.44 1/0.88',eq=saturation=1.1",
-    "cold": "curves=r='0/0 0.5/0.44 1/0.9':g='0/0 0.5/0.5 1/0.97':b='0/0.04 0.5/0.56 1/1',eq=saturation=1.05",
+    "bw":          "hue=s=0,eq=contrast=1.3:brightness=0.05",
+    "vibrant":     "eq=saturation=1.6:contrast=1.05:brightness=0.02",
+    "moody":       "curves=r='0/0 0.3/0.25 0.7/0.65 1/0.9':g='0/0 0.3/0.27 0.7/0.67 1/0.92':b='0/0.05 0.3/0.32 0.7/0.72 1/1',eq=saturation=0.9:contrast=1.15",
+    "warm":        "curves=r='0/0.05 0.5/0.58 1/1':g='0/0 0.5/0.5 1/0.95':b='0/0 0.5/0.44 1/0.88',eq=saturation=1.1",
+    "cold":        "curves=r='0/0 0.5/0.44 1/0.9':g='0/0 0.5/0.5 1/0.97':b='0/0.04 0.5/0.56 1/1',eq=saturation=1.05",
   }
   return grades[grade] || null
 }
 
 function getNativeMetadata() {
   const devices = [
-    { make: "Apple", model: "iPhone 15 Pro", software: "17.0" },
-    { make: "Apple", model: "iPhone 14", software: "16.6" },
-    { make: "Samsung", model: "Galaxy S23", software: "13" },
-    { make: "Samsung", model: "Galaxy S22 Ultra", software: "12" },
-    { make: "Google", model: "Pixel 8 Pro", software: "14" },
+    { make: "Apple",   model: "iPhone 15 Pro",     software: "17.0" },
+    { make: "Apple",   model: "iPhone 14",          software: "16.6" },
+    { make: "Samsung", model: "Galaxy S23",         software: "13" },
+    { make: "Samsung", model: "Galaxy S22 Ultra",   software: "12" },
+    { make: "Google",  model: "Pixel 8 Pro",        software: "14" },
   ]
   const device = devices[Math.floor(Math.random() * devices.length)]
   const now = new Date()
-  const daysAgo = Math.floor(Math.random() * 30)
-  now.setDate(now.getDate() - daysAgo)
+  now.setDate(now.getDate() - Math.floor(Math.random() * 30))
   now.setHours(Math.floor(Math.random() * 14) + 8)
   now.setMinutes(Math.floor(Math.random() * 60))
   const dateStr = now.toISOString().replace(/\.\d{3}Z$/, "").replace("T", " ")
@@ -147,13 +187,10 @@ async function detectSceneCuts(inputPath) {
 
 async function analyzeBPM(musicPath) {
   try {
-    // Extract audio samples and detect beats via energy analysis
     const { stdout } = await execAsync(`ffprobe -v quiet -show_entries format=duration -of csv=p=0 "${musicPath}"`)
     const duration = parseFloat(stdout.trim())
-    // Simple BPM estimation: analyze audio energy in 0.1s windows
     const tmpAudio = musicPath + "_bpm.raw"
     await execAsync(`ffmpeg -i "${musicPath}" -ac 1 -ar 8000 -f s16le "${tmpAudio}" -y 2>/dev/null`)
-    // Return estimated beat times (simplified: every ~0.5s for ~120BPM)
     const estimatedBPM = 120
     const beatInterval = 60 / estimatedBPM
     const beats = []
@@ -166,12 +203,19 @@ async function analyzeBPM(musicPath) {
 function buildTransitionFilter(transition, clipDuration) {
   if (!transition || transition === "none") return null
   const transitions = {
-    "flash": `fade=t=in:st=0:d=0.08:color=white,fade=t=out:st=${(clipDuration - 0.08).toFixed(2)}:d=0.08:color=white`,
-    "fade": `fade=t=in:st=0:d=0.2,fade=t=out:st=${(clipDuration - 0.2).toFixed(2)}:d=0.2`,
-    "glitch": `rgbashift=rh=3:rv=-3:gh=0:gv=0:bh=-3:bv=3`,
+    "flash":   `fade=t=in:st=0:d=0.08:color=white,fade=t=out:st=${(clipDuration - 0.08).toFixed(2)}:d=0.08:color=white`,
+    "fade":    `fade=t=in:st=0:d=0.2,fade=t=out:st=${(clipDuration - 0.2).toFixed(2)}:d=0.2`,
+    "glitch":  `rgbashift=rh=3:rv=-3:gh=0:gv=0:bh=-3:bv=3`,
     "zoom_in": `zoompan=z='min(zoom+0.002,1.1)':d=1:x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)'`,
   }
   return transitions[transition] || null
+}
+
+function buildWatermarkFilter(format) {
+  const formats = { "9:16": { w: 1080, h: 1920 }, "16:9": { w: 1920, h: 1080 }, "1:1": { w: 1080, h: 1080 }, "4:5": { w: 1080, h: 1350 } }
+  const target = formats[format] || formats["9:16"]
+  const fontSize = Math.floor(target.w * 0.032)
+  return `drawtext=text='CLIMB':fontsize=${fontSize}:fontcolor=white:x=w-tw-${Math.floor(target.w * 0.025)}:y=${Math.floor(target.h * 0.018)}:alpha=0.35:shadowcolor=black:shadowx=1:shadowy=1`
 }
 
 function buildTextOverlayFilter(text, clipDuration, format) {
@@ -190,8 +234,8 @@ function buildIntroOutroFilter(clipDuration, format) {
   const introAlpha = `if(lt(t,1.2),t/1.2,if(lt(t,2.4),1,0))`
   const outroAlpha = `if(gt(t,${(clipDuration - 1.5).toFixed(2)}),(t-${(clipDuration - 1.5).toFixed(2)})/1.5,0)`
   return [
-    `drawtext=text='CLIMB':fontsize=${fontSize}:fontcolor=white:x=(w-text_w)/2:y=(h-text_h)/2:alpha='${introAlpha}':fontfile=/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf`,
-    `drawtext=text='CLIMB':fontsize=${fontSize}:fontcolor=white:x=(w-text_w)/2:y=(h-text_h)/2:alpha='${outroAlpha}':fontfile=/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf`
+    `drawtext=text='CLIMB':fontsize=${fontSize}:fontcolor=white:x=(w-text_w)/2:y=(h-text_h)/2:alpha='${introAlpha}'`,
+    `drawtext=text='CLIMB':fontsize=${fontSize}:fontcolor=white:x=(w-text_w)/2:y=(h-text_h)/2:alpha='${outroAlpha}'`
   ].join(",")
 }
 
@@ -216,7 +260,7 @@ async function analyzeEffects(prompt, totalDuration, options, zoomIntensity, spe
 
 // ─── MAIN PROCESS ──────────────────────────────────────────────────────────
 
-async function processVideo({ jobId, videoUrls, videoPaths, prompt, options, musicUrl, format, zoomIntensity, speedIntensity, addIntroOutro, customTimestamps, colorGrade, transition, textOverlay, stabilize, vocalVolume }) {
+async function processVideo({ jobId, videoUrls, videoPaths, prompt, options, musicUrl, format, zoomIntensity, speedIntensity, addIntroOutro, customTimestamps, colorGrade, transition, textOverlay, stabilize, vocalVolume, watermark, exportQuality, exportCodec }) {
   const tmpDir = "/tmp"
   const inputPaths = []
   const clips = []
@@ -224,7 +268,6 @@ async function processVideo({ jobId, videoUrls, videoPaths, prompt, options, mus
   try {
     jobs[jobId] = { status: "processing", progress: 5 }
 
-    // Download video URLs
     for (let i = 0; i < (videoUrls || []).length; i++) {
       const url = videoUrls[i]
       const inputPath = path.join(tmpDir, `input_${Date.now()}_${i}.mp4`)
@@ -239,7 +282,6 @@ async function processVideo({ jobId, videoUrls, videoPaths, prompt, options, mus
 
     jobs[jobId].progress = 20
 
-    // Concatenate if multiple videos
     let mainInput = inputPaths[0]
     if (inputPaths.length > 1) {
       const listPath = path.join(tmpDir, `list_${Date.now()}.txt`)
@@ -255,31 +297,23 @@ async function processVideo({ jobId, videoUrls, videoPaths, prompt, options, mus
 
     jobs[jobId].progress = 25
 
-    // Stabilization pre-pass
     if (stabilize) {
       try {
         const stabPath = path.join(tmpDir, `stab_${Date.now()}.mp4`)
         const transformsPath = path.join(tmpDir, `transforms_${Date.now()}.trf`)
         await new Promise((resolve, reject) => {
-          ffmpeg(mainInput)
-            .outputOptions([`-vf vidstabdetect=stepsize=6:shakiness=8:accuracy=9:result=${transformsPath}`, "-f null"])
-            .output("/dev/null")
-            .on("end", resolve).on("error", reject).run()
+          ffmpeg(mainInput).outputOptions([`-vf vidstabdetect=stepsize=6:shakiness=8:accuracy=9:result=${transformsPath}`, "-f null"]).output("/dev/null").on("end", resolve).on("error", reject).run()
         })
         await new Promise((resolve, reject) => {
-          ffmpeg(mainInput)
-            .outputOptions([`-vf vidstabtransform=input=${transformsPath}:zoom=1:smoothing=15,unsharp=5:5:0.8:3:3:0.4`, "-c:v libx264", "-c:a copy"])
-            .output(stabPath)
-            .on("end", resolve).on("error", reject).run()
+          ffmpeg(mainInput).outputOptions([`-vf vidstabtransform=input=${transformsPath}:zoom=1:smoothing=15,unsharp=5:5:0.8:3:3:0.4`, "-c:v libx264", "-c:a copy"]).output(stabPath).on("end", resolve).on("error", reject).run()
         })
-        if (fs.existsSync(stabPath)) { mainInput = stabPath }
+        if (fs.existsSync(stabPath)) mainInput = stabPath
         if (fs.existsSync(transformsPath)) fs.unlinkSync(transformsPath)
       } catch (e) { console.error("Stabilisation échouée:", e.message) }
     }
 
     jobs[jobId].progress = 30
 
-    // Download music
     let musicPath = null
     if (musicUrl) {
       try {
@@ -291,7 +325,6 @@ async function processVideo({ jobId, videoUrls, videoPaths, prompt, options, mus
       } catch (e) { musicPath = null }
     }
 
-    // Analyze BPM if beat sync enabled
     let beatData = null
     if (options?.includes("Beat sync") && musicPath) {
       beatData = await analyzeBPM(musicPath)
@@ -300,7 +333,6 @@ async function processVideo({ jobId, videoUrls, videoPaths, prompt, options, mus
 
     jobs[jobId].progress = 35
 
-    // Subtitles
     let subtitles = []
     if (options?.includes("Sous-titres")) {
       try {
@@ -311,28 +343,20 @@ async function processVideo({ jobId, videoUrls, videoPaths, prompt, options, mus
 
     jobs[jobId].progress = 40
 
-    // Probe duration + dimensions
     const { stdout: durationStr } = await execAsync(`ffprobe -v quiet -show_entries format=duration -of csv=p=0 "${mainInput}"`)
     const totalDuration = parseFloat(durationStr.trim())
-    const { stdout: probeOut } = await execAsync(`ffprobe -v quiet -select_streams v:0 -show_entries stream=width,height -of csv=p=0 "${mainInput}"`)
-    const [inputW, inputH] = probeOut.trim().split(",").map(Number)
 
-    // Detect scene cuts
     const sceneCuts = await detectSceneCuts(mainInput)
     console.log(`Scènes détectées: ${sceneCuts.length}`)
 
-    // Analyze effects via AI
     const effects = await analyzeEffects(prompt, totalDuration, options, zoomIntensity, speedIntensity)
     jobs[jobId].progress = 45
 
-    // Generate timestamps via AI (or use custom)
     let durations = customTimestamps?.length > 0 ? customTimestamps : null
     if (!durations) {
       try {
-        // If beat sync, align cuts to beats
         const beatContext = beatData?.beats?.length > 0 ? `Les beats tombent à: ${beatData.beats.slice(0, 16).join(", ")}s. Essaie d'aligner les start sur les beats.` : ""
         const sceneContext = sceneCuts.length > 0 ? `Changements de scène détectés à: ${sceneCuts.slice(0, 10).map(t => t.toFixed(1)).join(", ")}s.` : ""
-
         const aiResponse = await anthropic.messages.create({
           model: "claude-sonnet-4-5", max_tokens: 1000,
           messages: [{ role: "user", content: `Éditeur vidéo expert TikTok/sport. Vidéo: ${Math.round(totalDuration)}s. Prompt: "${prompt || "edits dynamiques"}". ${beatContext} ${sceneContext} Génère les clips. JSON brut: [{"start":0,"duration":15,"name":"Edit #1"}]. Règles: start+duration<=${Math.round(totalDuration)}, durées 10-30s, si "1 clip" = 1 seul objet.` }]
@@ -351,8 +375,10 @@ async function processVideo({ jobId, videoUrls, videoPaths, prompt, options, mus
     if (!durations) durations = [{ start: 0, duration: 15, name: "Edit #1" }, { start: 10, duration: 20, name: "Edit #2" }, { start: 25, duration: 15, name: "Edit #3" }]
 
     jobs[jobId].progress = 48
+
     const targetFormat = format || "9:16"
-    const formatFilter = getFormatFilter(targetFormat)
+    const { scale, crf, bitrate, codec } = getQualitySettings(exportQuality, exportCodec)
+    const formatFilter = getFormatFilter(targetFormat, scale)
     const metadata = getNativeMetadata()
 
     for (let ci = 0; ci < durations.length; ci++) {
@@ -360,7 +386,6 @@ async function processVideo({ jobId, videoUrls, videoPaths, prompt, options, mus
       const outputPath = path.join(tmpDir, `clip_${ci}_${Date.now()}.mp4`)
       const srtPath = path.join(tmpDir, `clip_${ci}_${Date.now()}.srt`)
 
-      // SRT subtitles
       let hasSrt = false
       if (subtitles.length > 0) {
         const clipSubs = subtitles.filter(s => s.start >= clip.start && s.start < clip.start + clip.duration)
@@ -376,47 +401,46 @@ async function processVideo({ jobId, videoUrls, videoPaths, prompt, options, mus
       // ─ BUILD VIDEO FILTER CHAIN ─
       const vfFilters = []
 
-      // 1. Speed ramp (setpts must come first)
-      let setptsStr = ""
+      // 1. Speed ramp
       let atempoVal = "1.0"
       if (effects?.speedramp?.enabled && effects.speedramp.segments?.length > 0) {
         const avgSpeed = effects.speedramp.segments.reduce((s, seg) => s + seg.speed, 0) / effects.speedramp.segments.length
         const clampedSpeed = Math.max(0.5, Math.min(2.0, avgSpeed))
-        setptsStr = `setpts=${(1 / clampedSpeed).toFixed(3)}*PTS`
+        vfFilters.push(`setpts=${(1 / clampedSpeed).toFixed(3)}*PTS`)
         atempoVal = clampedSpeed.toFixed(2)
-        vfFilters.push(setptsStr)
       }
 
-      // 2. Stabilization already done pre-pass
-
-      // 3. Format/letterbox
+      // 2. Format/letterbox + quality scale
       vfFilters.push(formatFilter)
 
-      // 4. Auto-zoom
+      // 3. Auto-zoom
       if (effects?.autozoom?.enabled) {
         const intensity = Math.min(effects.autozoom.intensity || 1.15, 1.3)
         vfFilters.push(`scale=iw*${intensity.toFixed(3)}:ih*${intensity.toFixed(3)},crop=iw/${intensity.toFixed(3)}:ih/${intensity.toFixed(3)}`)
       }
 
-      // 5. Color grade
+      // 4. Color grade
       const gradeFilter = getColorGradeFilter(colorGrade)
       if (gradeFilter) vfFilters.push(gradeFilter)
 
-      // 6. Film grain (makes it look natural/organic)
+      // 5. Film grain
       vfFilters.push(`noise=alls=4:allf=t+u`)
 
-      // 7. Subtle vignette
+      // 6. Vignette
       vfFilters.push(`vignette=PI/5`)
 
-      // 8. Transition effects
+      // 7. Transition
       const transFilter = buildTransitionFilter(transition, clip.duration)
       if (transFilter) vfFilters.push(transFilter)
 
-      // 9. Text overlay
+      // 8. Text overlay
       const textFilter = buildTextOverlayFilter(textOverlay, clip.duration, targetFormat)
       if (textFilter) vfFilters.push(textFilter)
 
-      // 10. Intro/Outro logo
+      // 9. Watermark CLIMB
+      if (watermark) vfFilters.push(buildWatermarkFilter(targetFormat))
+
+      // 10. Intro/Outro
       if (addIntroOutro) vfFilters.push(buildIntroOutroFilter(clip.duration, targetFormat))
 
       // 11. Subtitles
@@ -432,22 +456,18 @@ async function processVideo({ jobId, videoUrls, videoPaths, prompt, options, mus
         else if (speed > 2.0) { audioFilters.push("atempo=2.0"); audioFilters.push(`atempo=${(speed / 2.0).toFixed(2)}`) }
         else if (speed < 0.5) { audioFilters.push("atempo=0.5"); audioFilters.push(`atempo=${(speed / 0.5).toFixed(2)}`) }
       }
-      // Mix vocal + music volume
       const vocalVol = vocalVolume !== undefined ? vocalVolume : 0.3
       if (musicPath && vocalVol > 0) audioFilters.push(`volume=${vocalVol}`)
 
       await new Promise((resolve, reject) => {
-        let cmd = ffmpeg(mainInput)
-          .setStartTime(clip.start)
-          .setDuration(clip.duration)
+        let cmd = ffmpeg(mainInput).setStartTime(clip.start).setDuration(clip.duration)
 
         const outputOpts = [
           "-movflags faststart",
-          "-c:v libx264",
+          `-c:v ${codec}`,
           "-preset fast",
-          "-crf 22",
+          `-crf ${crf}`,
           `-vf ${vfString}`,
-          // Strip FFmpeg metadata + inject device metadata
           "-map_metadata -1",
           `-metadata make="${metadata.make}"`,
           `-metadata model="${metadata.model}"`,
@@ -455,10 +475,9 @@ async function processVideo({ jobId, videoUrls, videoPaths, prompt, options, mus
           `-metadata creation_time="${metadata.date}"`,
           `-metadata com.apple.quicktime.make="${metadata.make}"`,
           `-metadata com.apple.quicktime.model="${metadata.model}"`,
-          // Randomize bitrate slightly to avoid pattern detection
-          `-b:v ${Math.floor(4000 + Math.random() * 1000)}k`,
-          `-maxrate ${Math.floor(6000 + Math.random() * 1000)}k`,
-          `-bufsize 8000k`,
+          `-b:v ${Math.floor(bitrate + Math.random() * 500)}k`,
+          `-maxrate ${Math.floor(bitrate * 1.4 + Math.random() * 500)}k`,
+          `-bufsize ${bitrate * 2}k`,
         ]
 
         if (musicPath && fs.existsSync(musicPath)) {
@@ -480,7 +499,6 @@ async function processVideo({ jobId, videoUrls, videoPaths, prompt, options, mus
           .run()
       })
 
-      // Generate thumbnail
       const thumbPath = path.join(tmpDir, `thumb_${ci}_${Date.now()}.jpg`)
       try { await execAsync(`ffmpeg -i "${outputPath}" -ss 0.5 -vframes 1 -q:v 2 "${thumbPath}" -y 2>/dev/null`) } catch {}
 
