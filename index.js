@@ -18,15 +18,13 @@ ffmpeg.setFfmpegPath(ffmpegPath)
 
 const app = express()
 app.use(cors())
-app.use(express.json({ limit: "50mb" }))
+app.use(express.json({ limit: "100mb" }))
 
 const PORT = process.env.PORT || 3001
 const aai = new AssemblyAI({ apiKey: process.env.ASSEMBLYAI_API_KEY })
 const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY })
 const supabase = process.env.SUPABASE_URL && process.env.SUPABASE_SERVICE_KEY
-  ? createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_KEY, {
-      realtime: { transport: ws }
-    })
+  ? createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_KEY, { realtime: { transport: ws } })
   : null
 
 const upload = multer({ dest: "/tmp/uploads/", limits: { fileSize: 2 * 1024 * 1024 * 1024 } })
@@ -46,10 +44,7 @@ app.post("/download", async (req, res) => {
   try {
     await execAsync(`yt-dlp --cookies /app/cookies.txt -f "best[ext=mp4]/best" -o "${outputPath}" "${url}"`)
     res.json({ path: outputPath })
-  } catch (err) {
-    console.error("Erreur yt-dlp:", err.message)
-    res.status(500).json({ error: err.message })
-  }
+  } catch (err) { res.status(500).json({ error: err.message }) }
 })
 
 app.post("/thumbnail", async (req, res) => {
@@ -73,10 +68,7 @@ app.post("/share", async (req, res) => {
     if (error) throw error
     const { data: urlData } = supabase.storage.from("clips").getPublicUrl(fileName)
     res.json({ url: urlData.publicUrl, fileName })
-  } catch (err) {
-    console.error("Share error:", err.message)
-    res.status(500).json({ error: err.message })
-  }
+  } catch (err) { res.status(500).json({ error: err.message }) }
 })
 
 app.post("/preview-timestamps", async (req, res) => {
@@ -86,9 +78,13 @@ app.post("/preview-timestamps", async (req, res) => {
     const mainInput = videoPaths[0]
     const { stdout: durationStr } = await execAsync(`ffprobe -v quiet -show_entries format=duration -of csv=p=0 "${mainInput}"`)
     const totalDuration = parseFloat(durationStr.trim())
+    const frames = await extractKeyFrames(mainInput, 6)
     const aiResponse = await anthropic.messages.create({
       model: "claude-sonnet-4-5", max_tokens: 1000,
-      messages: [{ role: "user", content: `Éditeur vidéo expert. Vidéo: ${Math.round(totalDuration)}s. Prompt: "${prompt || "edits dynamiques"}". Génère les timestamps. JSON brut sans backticks: [{"start":0,"duration":15,"name":"Edit #1","description":"Description courte"}]` }]
+      messages: [{ role: "user", content: [
+        ...frames.map(f => ({ type: "image", source: { type: "base64", media_type: "image/jpeg", data: f.data } })),
+        { type: "text", text: `Éditeur vidéo expert. Vidéo: ${Math.round(totalDuration)}s. Prompt: "${prompt || "edits dynamiques"}". Analyse ces frames et génère les meilleurs timestamps. JSON brut: [{"start":0,"duration":15,"name":"Edit #1","description":"Description courte"}]` }
+      ]}]
     })
     const text = aiResponse.content[0].type === "text" ? aiResponse.content[0].text : "[]"
     const parsed = JSON.parse(text.replace(/```json\n?/g, "").replace(/```\n?/g, "").trim())
@@ -108,13 +104,34 @@ app.post("/prompt-help", async (req, res) => {
   } catch (err) { res.status(500).json({ error: err.message }) }
 })
 
+// ─── AUTO-ANALYZE : analyse la vidéo et génère le prompt automatiquement ──
+app.post("/analyze-video", async (req, res) => {
+  const { videoPath } = req.body
+  if (!videoPath) return res.status(400).json({ error: "videoPath requis" })
+  try {
+    const frames = await extractKeyFrames(videoPath, 8)
+    const { stdout: durationStr } = await execAsync(`ffprobe -v quiet -show_entries format=duration -of csv=p=0 "${videoPath}"`)
+    const totalDuration = parseFloat(durationStr.trim())
+    const response = await anthropic.messages.create({
+      model: "claude-sonnet-4-5", max_tokens: 800,
+      messages: [{ role: "user", content: [
+        ...frames.map(f => ({ type: "image", source: { type: "base64", media_type: "image/jpeg", data: f.data } })),
+        { type: "text", text: `Tu es un expert en montage vidéo TikTok/Instagram. Analyse ces frames de la vidéo (${Math.round(totalDuration)}s) et réponds en JSON brut sans backticks: {"contentType":"sport|lifestyle|gaming|music|travel","prompt":"prompt de montage optimisé en français","suggestedFormat":"9:16|16:9","energy":"high|medium|low","description":"description courte du contenu en français"}` }
+      ]}]
+    })
+    const text = response.content[0].type === "text" ? response.content[0].text : "{}"
+    const analysis = JSON.parse(text.replace(/```json\n?/g, "").replace(/```\n?/g, "").trim())
+    res.json(analysis)
+  } catch (err) { res.status(500).json({ error: err.message }) }
+})
+
 app.post("/generate", async (req, res) => {
-  const { videoUrls, videoPaths, prompt, options, musicUrl, format, zoomIntensity, speedIntensity, addIntroOutro, customTimestamps, colorGrade, transition, textOverlay, stabilize, vocalVolume, watermark, exportQuality, exportCodec } = req.body
+  const { videoUrls, videoPaths, prompt, options, musicUrl, format, zoomIntensity, speedIntensity, addIntroOutro, customTimestamps, colorGrade, transition, textOverlay, stabilize, vocalVolume, watermark, exportQuality, exportCodec, subtitleStyle, autoAnalysis } = req.body
   if (!videoUrls?.length && !videoPaths?.length) return res.status(400).json({ error: "Aucune vidéo" })
   const jobId = `job_${Date.now()}`
   jobs[jobId] = { status: "processing", progress: 0, clips: null, error: null }
   res.json({ jobId })
-  processVideo({ jobId, videoUrls, videoPaths, prompt, options, musicUrl, format, zoomIntensity, speedIntensity, addIntroOutro, customTimestamps, colorGrade, transition, textOverlay, stabilize, vocalVolume, watermark, exportQuality, exportCodec })
+  processVideo({ jobId, videoUrls, videoPaths, prompt, options, musicUrl, format, zoomIntensity, speedIntensity, addIntroOutro, customTimestamps, colorGrade, transition, textOverlay, stabilize, vocalVolume, watermark, exportQuality, exportCodec, subtitleStyle, autoAnalysis })
 })
 
 app.get("/status/:jobId", (req, res) => {
@@ -124,6 +141,96 @@ app.get("/status/:jobId", (req, res) => {
 })
 
 // ─── HELPERS ───────────────────────────────────────────────────────────────
+
+// Extrait des frames clés de la vidéo pour analyse IA
+async function extractKeyFrames(videoPath, count = 6) {
+  const frames = []
+  try {
+    const { stdout: durationStr } = await execAsync(`ffprobe -v quiet -show_entries format=duration -of csv=p=0 "${videoPath}"`)
+    const duration = parseFloat(durationStr.trim())
+    const interval = duration / (count + 1)
+    for (let i = 1; i <= count; i++) {
+      const timestamp = (interval * i).toFixed(2)
+      const framePath = path.join("/tmp", `frame_${Date.now()}_${i}.jpg`)
+      try {
+        await execAsync(`ffmpeg -i "${videoPath}" -ss ${timestamp} -vframes 1 -q:v 3 -vf "scale=480:-1" "${framePath}" -y 2>/dev/null`)
+        if (fs.existsSync(framePath)) {
+          const data = fs.readFileSync(framePath).toString("base64")
+          frames.push({ timestamp: parseFloat(timestamp), data })
+          fs.unlinkSync(framePath)
+        }
+      } catch {}
+    }
+  } catch (e) { console.error("extractKeyFrames:", e.message) }
+  return frames
+}
+
+// Vraie analyse audio pour détecter les beats
+async function detectBeats(musicPath) {
+  try {
+    const { stdout: durationStr } = await execAsync(`ffprobe -v quiet -show_entries format=duration -of csv=p=0 "${musicPath}"`)
+    const duration = parseFloat(durationStr.trim())
+    // Extraire l'audio en mono 22050Hz pour analyse
+    const rawPath = musicPath + "_beats.raw"
+    await execAsync(`ffmpeg -i "${musicPath}" -ac 1 -ar 22050 -f f32le "${rawPath}" -y 2>/dev/null`)
+    if (!fs.existsSync(rawPath)) return { bpm: 120, beats: [] }
+    // Lire les samples et détecter les pics d'énergie
+    const buffer = fs.readFileSync(rawPath)
+    fs.unlinkSync(rawPath)
+    const samples = new Float32Array(buffer.buffer)
+    const sampleRate = 22050
+    const windowSize = Math.floor(sampleRate * 0.05) // 50ms windows
+    const energies = []
+    for (let i = 0; i < samples.length - windowSize; i += windowSize) {
+      let energy = 0
+      for (let j = 0; j < windowSize; j++) energy += samples[i + j] ** 2
+      energies.push({ time: i / sampleRate, energy: energy / windowSize })
+    }
+    // Détecter les pics (beat = énergie > moyenne * 1.5)
+    const avgEnergy = energies.reduce((s, e) => s + e.energy, 0) / energies.length
+    const threshold = avgEnergy * 1.5
+    const beats = []
+    let lastBeat = -0.3
+    for (const e of energies) {
+      if (e.energy > threshold && e.time - lastBeat > 0.25) {
+        beats.push(parseFloat(e.time.toFixed(3)))
+        lastBeat = e.time
+      }
+    }
+    // Estimer le BPM
+    if (beats.length > 2) {
+      const intervals = []
+      for (let i = 1; i < Math.min(beats.length, 20); i++) intervals.push(beats[i] - beats[i-1])
+      const avgInterval = intervals.reduce((s, v) => s + v, 0) / intervals.length
+      const bpm = Math.round(60 / avgInterval)
+      return { bpm, beats: beats.slice(0, 60) }
+    }
+    return { bpm: 120, beats }
+  } catch (e) { console.error("detectBeats:", e.message); return { bpm: 120, beats: [] } }
+}
+
+// Détecte le sujet principal dans la vidéo pour auto-crop intelligent
+async function detectMainSubject(videoPath, format) {
+  try {
+    const framePath = path.join("/tmp", `subject_${Date.now()}.jpg`)
+    await execAsync(`ffmpeg -i "${videoPath}" -ss 1 -vframes 1 -q:v 2 "${framePath}" -y 2>/dev/null`)
+    if (!fs.existsSync(framePath)) return null
+    const frameData = fs.readFileSync(framePath).toString("base64")
+    fs.unlinkSync(framePath)
+    const { stdout: probeOut } = await execAsync(`ffprobe -v quiet -select_streams v:0 -show_entries stream=width,height -of csv=p=0 "${videoPath}"`)
+    const [w, h] = probeOut.trim().split(",").map(Number)
+    const response = await anthropic.messages.create({
+      model: "claude-sonnet-4-5", max_tokens: 200,
+      messages: [{ role: "user", content: [
+        { type: "image", source: { type: "base64", media_type: "image/jpeg", data: frameData } },
+        { type: "text", text: `Vidéo ${w}x${h}. Détecte le sujet principal. JSON brut: {"x_pct":0.5,"y_pct":0.3} où x_pct et y_pct sont les coordonnées du centre du sujet en pourcentage (0-1). Si pas de sujet clair: {"x_pct":0.5,"y_pct":0.5}` }
+      ]}]
+    })
+    const text = response.content[0].type === "text" ? response.content[0].text : ""
+    const result = JSON.parse(text.replace(/```json\n?/g, "").replace(/```\n?/g, "").trim())
+    return result
+  } catch { return null }
+}
 
 function getQualitySettings(exportQuality, exportCodec) {
   const qualityMap = {
@@ -137,14 +244,18 @@ function getQualitySettings(exportQuality, exportCodec) {
   return { ...q, codec }
 }
 
-function getFormatFilter(format, scale) {
+function getFormatFilter(format, scale, subjectX, subjectY) {
   const formats = { "9:16": { w: 1080, h: 1920 }, "16:9": { w: 1920, h: 1080 }, "1:1": { w: 1080, h: 1080 }, "4:5": { w: 1080, h: 1350 } }
   const target = formats[format] || formats["9:16"]
-  if (scale) {
-    const [sw, sh] = scale.split(":").map(Number)
-    return `scale=${sw}:${sh}:force_original_aspect_ratio=decrease,pad=${sw}:${sh}:(ow-iw)/2:(oh-ih)/2:black`
+  const tw = scale ? parseInt(scale.split(":")[0]) : target.w
+  const th = scale ? parseInt(scale.split(":")[1]) : target.h
+  // Auto-crop intelligent si sujet détecté
+  if (subjectX !== undefined && subjectY !== undefined) {
+    const xPct = Math.max(0.1, Math.min(0.9, subjectX))
+    const yPct = Math.max(0.1, Math.min(0.9, subjectY))
+    return `scale=${tw * 2}:${th * 2}:force_original_aspect_ratio=increase,crop=${tw}:${th}:iw*${xPct.toFixed(2)}-${tw}/2:ih*${yPct.toFixed(2)}-${th}/2`
   }
-  return `scale=${target.w}:${target.h}:force_original_aspect_ratio=decrease,pad=${target.w}:${target.h}:(ow-iw)/2:(oh-ih)/2:black`
+  return `scale=${tw}:${th}:force_original_aspect_ratio=decrease,pad=${tw}:${th}:(ow-iw)/2:(oh-ih)/2:black`
 }
 
 function getColorGradeFilter(grade) {
@@ -173,31 +284,14 @@ function getNativeMetadata() {
   now.setDate(now.getDate() - Math.floor(Math.random() * 30))
   now.setHours(Math.floor(Math.random() * 14) + 8)
   now.setMinutes(Math.floor(Math.random() * 60))
-  const dateStr = now.toISOString().replace(/\.\d{3}Z$/, "").replace("T", " ")
-  return { ...device, date: dateStr }
+  return { ...device, date: now.toISOString().replace(/\.\d{3}Z$/, "").replace("T", " ") }
 }
 
 async function detectSceneCuts(inputPath) {
   try {
     const { stdout } = await execAsync(`ffprobe -v quiet -show_frames -select_streams v -skip_frame noref -show_entries frame=pkt_pts_time,pict_type -of csv "${inputPath}" 2>/dev/null | grep ",I" | head -50`)
-    const times = stdout.trim().split("\n").map(line => parseFloat(line.split(",")[0])).filter(t => !isNaN(t))
-    return times
+    return stdout.trim().split("\n").map(line => parseFloat(line.split(",")[0])).filter(t => !isNaN(t))
   } catch { return [] }
-}
-
-async function analyzeBPM(musicPath) {
-  try {
-    const { stdout } = await execAsync(`ffprobe -v quiet -show_entries format=duration -of csv=p=0 "${musicPath}"`)
-    const duration = parseFloat(stdout.trim())
-    const tmpAudio = musicPath + "_bpm.raw"
-    await execAsync(`ffmpeg -i "${musicPath}" -ac 1 -ar 8000 -f s16le "${tmpAudio}" -y 2>/dev/null`)
-    const estimatedBPM = 120
-    const beatInterval = 60 / estimatedBPM
-    const beats = []
-    for (let t = 0; t < duration; t += beatInterval) beats.push(parseFloat(t.toFixed(3)))
-    if (fs.existsSync(tmpAudio)) fs.unlinkSync(tmpAudio)
-    return { bpm: estimatedBPM, beats }
-  } catch { return { bpm: 120, beats: [] } }
 }
 
 function buildTransitionFilter(transition, clipDuration) {
@@ -227,6 +321,31 @@ function buildTextOverlayFilter(text, clipDuration, format) {
   return `drawtext=text='${escapedText}':fontsize=${fontSize}:fontcolor=white:x=(w-text_w)/2:y=(h-text_h)/2:alpha='if(lt(t,0.3),t/0.3,if(gt(t,${(clipDuration - 0.3).toFixed(2)}),(${clipDuration.toFixed(2)}-t)/0.3,1))':shadowcolor=black:shadowx=2:shadowy=2`
 }
 
+// Sous-titres stylisés TikTok — mot par mot avec fond coloré
+function buildStyledSubtitlesFilter(subtitles, clipStart, clipDuration, format, style) {
+  if (!subtitles?.length) return null
+  const formats = { "9:16": { w: 1080, h: 1920 }, "16:9": { w: 1920, h: 1080 }, "1:1": { w: 1080, h: 1080 }, "4:5": { w: 1080, h: 1350 } }
+  const target = formats[format] || formats["9:16"]
+  const fontSize = Math.floor(target.w * 0.065)
+  const yPos = Math.floor(target.h * 0.72)
+  const clipSubs = subtitles.filter(s => s.start >= clipStart && s.start < clipStart + clipDuration)
+  if (!clipSubs.length) return null
+  const styles = {
+    "tiktok":    { color: "white",  box: 1, boxcolor: "black@0.6", boxborderw: 8 },
+    "yellow":    { color: "yellow", box: 1, boxcolor: "black@0.7", boxborderw: 8 },
+    "white_box": { color: "black",  box: 1, boxcolor: "white@0.9", boxborderw: 10 },
+    "neon":      { color: "#00ff88", box: 1, boxcolor: "black@0.5", boxborderw: 6 },
+  }
+  const s = styles[style] || styles["tiktok"]
+  const drawFilters = clipSubs.map(sub => {
+    const relStart = (sub.start - clipStart).toFixed(3)
+    const relEnd = (sub.end - clipStart).toFixed(3)
+    const escapedText = (sub.text || "").replace(/'/g, "\\'").replace(/:/g, "\\:").replace(/\[/g, "\\[").replace(/\]/g, "\\]").toUpperCase()
+    return `drawtext=text='${escapedText}':fontsize=${fontSize}:fontcolor=${s.color}:x=(w-text_w)/2:y=${yPos}:box=${s.box}:boxcolor=${s.boxcolor}:boxborderw=${s.boxborderw}:enable='between(t,${relStart},${relEnd})':shadowcolor=black:shadowx=2:shadowy=2`
+  })
+  return drawFilters.join(",")
+}
+
 function buildIntroOutroFilter(clipDuration, format) {
   const formats = { "9:16": { w: 1080, h: 1920 }, "16:9": { w: 1920, h: 1080 }, "1:1": { w: 1080, h: 1080 }, "4:5": { w: 1080, h: 1350 } }
   const target = formats[format] || formats["9:16"]
@@ -249,7 +368,7 @@ async function analyzeEffects(prompt, totalDuration, options, zoomIntensity, spe
   try {
     const response = await anthropic.messages.create({
       model: "claude-sonnet-4-5", max_tokens: 600,
-      messages: [{ role: "user", content: `Expert montage vidéo TikTok. Prompt: "${prompt || "edit dynamique"}". Vidéo: ${Math.round(totalDuration)}s. Options: ${options?.join(", ")}. Zoom max: ${zoomMax.toFixed(2)}, Speed max: ${speedMax.toFixed(2)}, Speed min: ${speedMin.toFixed(2)}. JSON brut: {"autozoom":{"enabled":${needsZoom},"intensity":${zoomMax.toFixed(2)}},"speedramp":{"enabled":${needsSpeedRamp},"segments":[{"start_pct":0,"end_pct":0.25,"speed":1.5},{"start_pct":0.25,"end_pct":0.6,"speed":0.7},{"start_pct":0.6,"end_pct":1.0,"speed":1.8}]}}` }]
+      messages: [{ role: "user", content: `Expert montage vidéo TikTok. Prompt: "${prompt || "edit dynamique"}". Vidéo: ${Math.round(totalDuration)}s. Zoom max: ${zoomMax.toFixed(2)}, Speed max: ${speedMax.toFixed(2)}, Speed min: ${speedMin.toFixed(2)}. JSON brut: {"autozoom":{"enabled":${needsZoom},"intensity":${zoomMax.toFixed(2)}},"speedramp":{"enabled":${needsSpeedRamp},"segments":[{"start_pct":0,"end_pct":0.25,"speed":1.5},{"start_pct":0.25,"end_pct":0.6,"speed":0.7},{"start_pct":0.6,"end_pct":1.0,"speed":1.8}]}}` }]
     })
     const text = response.content[0].type === "text" ? response.content[0].text : ""
     return JSON.parse(text.replace(/```json\n?/g, "").replace(/```\n?/g, "").trim())
@@ -260,7 +379,7 @@ async function analyzeEffects(prompt, totalDuration, options, zoomIntensity, spe
 
 // ─── MAIN PROCESS ──────────────────────────────────────────────────────────
 
-async function processVideo({ jobId, videoUrls, videoPaths, prompt, options, musicUrl, format, zoomIntensity, speedIntensity, addIntroOutro, customTimestamps, colorGrade, transition, textOverlay, stabilize, vocalVolume, watermark, exportQuality, exportCodec }) {
+async function processVideo({ jobId, videoUrls, videoPaths, prompt, options, musicUrl, format, zoomIntensity, speedIntensity, addIntroOutro, customTimestamps, colorGrade, transition, textOverlay, stabilize, vocalVolume, watermark, exportQuality, exportCodec, subtitleStyle, autoAnalysis }) {
   const tmpDir = "/tmp"
   const inputPaths = []
   const clips = []
@@ -276,11 +395,10 @@ async function processVideo({ jobId, videoUrls, videoPaths, prompt, options, mus
       response.data.pipe(writer)
       await new Promise((resolve, reject) => { writer.on("finish", resolve); writer.on("error", reject) })
       inputPaths.push(inputPath)
-      jobs[jobId].progress = 10 + Math.floor((i + 1) / videoUrls.length * 10)
     }
     for (const p of (videoPaths || [])) { if (fs.existsSync(p)) inputPaths.push(p) }
 
-    jobs[jobId].progress = 20
+    jobs[jobId].progress = 15
 
     let mainInput = inputPaths[0]
     if (inputPaths.length > 1) {
@@ -295,7 +413,19 @@ async function processVideo({ jobId, videoUrls, videoPaths, prompt, options, mus
       fs.unlinkSync(listPath)
     }
 
-    jobs[jobId].progress = 25
+    jobs[jobId].progress = 20
+
+    // ─── ANALYSE VIDÉO PAR IA (frames réelles) ───
+    jobs[jobId] = { ...jobs[jobId], progress: 22, message: "Analyse du contenu par l'IA... 🔍" }
+    const keyFrames = await extractKeyFrames(mainInput, 8)
+    console.log(`Frames extraites: ${keyFrames.length}`)
+
+    // Détection sujet principal pour auto-crop
+    jobs[jobId] = { ...jobs[jobId], progress: 25, message: "Détection du sujet principal... 🎯" }
+    const subjectPos = await detectMainSubject(mainInput, format)
+    console.log("Sujet détecté:", subjectPos)
+
+    jobs[jobId].progress = 28
 
     if (stabilize) {
       try {
@@ -309,10 +439,10 @@ async function processVideo({ jobId, videoUrls, videoPaths, prompt, options, mus
         })
         if (fs.existsSync(stabPath)) mainInput = stabPath
         if (fs.existsSync(transformsPath)) fs.unlinkSync(transformsPath)
-      } catch (e) { console.error("Stabilisation échouée:", e.message) }
+      } catch (e) { console.error("Stabilisation:", e.message) }
     }
 
-    jobs[jobId].progress = 30
+    jobs[jobId].progress = 32
 
     let musicPath = null
     if (musicUrl) {
@@ -325,41 +455,51 @@ async function processVideo({ jobId, videoUrls, videoPaths, prompt, options, mus
       } catch (e) { musicPath = null }
     }
 
+    // ─── VRAIE DÉTECTION DE BEATS ───
     let beatData = null
     if (options?.includes("Beat sync") && musicPath) {
-      beatData = await analyzeBPM(musicPath)
-      console.log(`BPM détecté: ${beatData.bpm}`)
+      jobs[jobId] = { ...jobs[jobId], progress: 35, message: "Analyse du beat en cours... 🎵" }
+      beatData = await detectBeats(musicPath)
+      console.log(`BPM réel détecté: ${beatData.bpm}, ${beatData.beats.length} beats`)
     }
 
-    jobs[jobId].progress = 35
+    jobs[jobId].progress = 38
 
+    // ─── TRANSCRIPTION POUR SOUS-TITRES ───
     let subtitles = []
     if (options?.includes("Sous-titres")) {
+      jobs[jobId] = { ...jobs[jobId], progress: 40, message: "Transcription audio... 📝" }
       try {
         const transcript = await aai.transcripts.transcribe({ audio: mainInput, language_detection: true })
         if (transcript.words) subtitles = transcript.words.map(w => ({ text: w.text, start: w.start / 1000, end: w.end / 1000 }))
+        console.log(`Sous-titres: ${subtitles.length} mots`)
       } catch (e) { console.error("Transcription:", e.message) }
     }
 
-    jobs[jobId].progress = 40
+    jobs[jobId].progress = 43
 
     const { stdout: durationStr } = await execAsync(`ffprobe -v quiet -show_entries format=duration -of csv=p=0 "${mainInput}"`)
     const totalDuration = parseFloat(durationStr.trim())
 
     const sceneCuts = await detectSceneCuts(mainInput)
-    console.log(`Scènes détectées: ${sceneCuts.length}`)
 
+    // ─── TIMESTAMPS IA AVEC ANALYSE VISUELLE RÉELLE ───
+    jobs[jobId] = { ...jobs[jobId], progress: 45, message: "L'IA analyse tes meilleures séquences... 🎬" }
     const effects = await analyzeEffects(prompt, totalDuration, options, zoomIntensity, speedIntensity)
-    jobs[jobId].progress = 45
 
     let durations = customTimestamps?.length > 0 ? customTimestamps : null
     if (!durations) {
       try {
-        const beatContext = beatData?.beats?.length > 0 ? `Les beats tombent à: ${beatData.beats.slice(0, 16).join(", ")}s. Essaie d'aligner les start sur les beats.` : ""
-        const sceneContext = sceneCuts.length > 0 ? `Changements de scène détectés à: ${sceneCuts.slice(0, 10).map(t => t.toFixed(1)).join(", ")}s.` : ""
+        const beatContext = beatData?.beats?.length > 0 ? `Beats réels détectés à: ${beatData.beats.slice(0, 20).join(", ")}s (BPM: ${beatData.bpm}). Aligne les start sur ces beats.` : ""
+        const sceneContext = sceneCuts.length > 0 ? `Changements de scène à: ${sceneCuts.slice(0, 10).map(t => t.toFixed(1)).join(", ")}s.` : ""
+        const frameTimings = keyFrames.map((f, i) => `Frame ${i+1} à ${f.timestamp}s`).join(", ")
+
         const aiResponse = await anthropic.messages.create({
-          model: "claude-sonnet-4-5", max_tokens: 1000,
-          messages: [{ role: "user", content: `Éditeur vidéo expert TikTok/sport. Vidéo: ${Math.round(totalDuration)}s. Prompt: "${prompt || "edits dynamiques"}". ${beatContext} ${sceneContext} Génère les clips. JSON brut: [{"start":0,"duration":15,"name":"Edit #1"}]. Règles: start+duration<=${Math.round(totalDuration)}, durées 10-30s, si "1 clip" = 1 seul objet.` }]
+          model: "claude-sonnet-4-5", max_tokens: 1200,
+          messages: [{ role: "user", content: [
+            ...keyFrames.map(f => ({ type: "image", source: { type: "base64", media_type: "image/jpeg", data: f.data } })),
+            { type: "text", text: `Expert montage vidéo TikTok. Analyse ces frames (${frameTimings}). Vidéo: ${Math.round(totalDuration)}s. Prompt: "${prompt || "edits dynamiques"}". ${beatContext} ${sceneContext} Génère les meilleurs clips basés sur l'analyse visuelle. JSON brut: [{"start":0,"duration":15,"name":"Edit #1","reason":"pourquoi ce moment"}]. Règles: start+duration<=${Math.round(totalDuration)}, durées 10-30s.` }
+          ]}]
         })
         const aiText = aiResponse.content[0].type === "text" ? aiResponse.content[0].text : ""
         const parsed = JSON.parse(aiText.replace(/```json\n?/g, "").replace(/```\n?/g, "").trim())
@@ -374,29 +514,15 @@ async function processVideo({ jobId, videoUrls, videoPaths, prompt, options, mus
     }
     if (!durations) durations = [{ start: 0, duration: 15, name: "Edit #1" }, { start: 10, duration: 20, name: "Edit #2" }, { start: 25, duration: 15, name: "Edit #3" }]
 
-    jobs[jobId].progress = 48
+    jobs[jobId] = { ...jobs[jobId], progress: 48, message: "Rendu des clips en cours... ✨" }
 
     const targetFormat = format || "9:16"
     const { scale, crf, bitrate, codec } = getQualitySettings(exportQuality, exportCodec)
-    const formatFilter = getFormatFilter(targetFormat, scale)
     const metadata = getNativeMetadata()
 
     for (let ci = 0; ci < durations.length; ci++) {
       const clip = durations[ci]
       const outputPath = path.join(tmpDir, `clip_${ci}_${Date.now()}.mp4`)
-      const srtPath = path.join(tmpDir, `clip_${ci}_${Date.now()}.srt`)
-
-      let hasSrt = false
-      if (subtitles.length > 0) {
-        const clipSubs = subtitles.filter(s => s.start >= clip.start && s.start < clip.start + clip.duration)
-        if (clipSubs.length > 0) {
-          const toSrtTime = t => { const h = Math.floor(t / 3600).toString().padStart(2, "0"); const m = Math.floor((t % 3600) / 60).toString().padStart(2, "0"); const s2 = Math.floor(t % 60).toString().padStart(2, "0"); const ms = Math.floor((t % 1) * 1000).toString().padStart(3, "0"); return `${h}:${m}:${s2},${ms}` }
-          let srtContent = ""
-          clipSubs.forEach((s, i) => { srtContent += `${i + 1}\n${toSrtTime(s.start - clip.start)} --> ${toSrtTime(s.end - clip.start)}\n${s.text}\n\n` })
-          fs.writeFileSync(srtPath, srtContent)
-          hasSrt = true
-        }
-      }
 
       const vfFilters = []
 
@@ -408,7 +534,8 @@ async function processVideo({ jobId, videoUrls, videoPaths, prompt, options, mus
         atempoVal = clampedSpeed.toFixed(2)
       }
 
-      vfFilters.push(formatFilter)
+      // Auto-crop intelligent avec position du sujet
+      vfFilters.push(getFormatFilter(targetFormat, scale, subjectPos?.x_pct, subjectPos?.y_pct))
 
       if (effects?.autozoom?.enabled) {
         const intensity = Math.min(effects.autozoom.intensity || 1.15, 1.3)
@@ -427,11 +554,14 @@ async function processVideo({ jobId, videoUrls, videoPaths, prompt, options, mus
       const textFilter = buildTextOverlayFilter(textOverlay, clip.duration, targetFormat)
       if (textFilter) vfFilters.push(textFilter)
 
+      // Sous-titres stylisés TikTok
+      if (subtitles.length > 0) {
+        const styledSubFilter = buildStyledSubtitlesFilter(subtitles, clip.start, clip.duration, targetFormat, subtitleStyle || "tiktok")
+        if (styledSubFilter) vfFilters.push(styledSubFilter)
+      }
+
       if (watermark) vfFilters.push(buildWatermarkFilter(targetFormat))
-
       if (addIntroOutro) vfFilters.push(buildIntroOutroFilter(clip.duration, targetFormat))
-
-      if (hasSrt) vfFilters.push(`subtitles=${srtPath}:force_style='FontSize=16,PrimaryColour=&HFFFFFF,OutlineColour=&H000000,Outline=2,Alignment=2'`)
 
       const vfString = vfFilters.join(",")
 
@@ -476,12 +606,8 @@ async function processVideo({ jobId, videoUrls, videoPaths, prompt, options, mus
         }
 
         cmd.outputOptions(outputOpts).output(outputPath)
-          .on("end", () => { if (hasSrt && fs.existsSync(srtPath)) fs.unlinkSync(srtPath); resolve() })
-          .on("error", (err, stdout, stderr) => {
-            console.error("FFmpeg err:", stderr?.slice(-500))
-            if (hasSrt && fs.existsSync(srtPath)) try { fs.unlinkSync(srtPath) } catch {}
-            reject(err)
-          })
+          .on("end", resolve)
+          .on("error", (err, stdout, stderr) => { console.error("FFmpeg err:", stderr?.slice(-500)); reject(err) })
           .run()
       })
 
