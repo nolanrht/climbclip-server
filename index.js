@@ -29,8 +29,44 @@ const supabase = process.env.SUPABASE_URL && process.env.SUPABASE_SERVICE_KEY
 
 const upload = multer({ dest: "/tmp/uploads/", limits: { fileSize: 2 * 1024 * 1024 * 1024 } })
 const jobs = {}
+const sseClients = {} // jobId → [res, ...]
+
+// ─── SSE helper ────────────────────────────────────────────────────────────
+function pushSSE(jobId, data) {
+  if (!sseClients[jobId]) return
+  const msg = `data: ${JSON.stringify(data)}\n\n`
+  sseClients[jobId] = sseClients[jobId].filter(res => {
+    try { res.write(msg); return true } catch { return false }
+  })
+}
+
+function updateJob(jobId, update) {
+  jobs[jobId] = { ...jobs[jobId], ...update }
+  pushSSE(jobId, jobs[jobId])
+}
 
 app.get("/health", (req, res) => res.json({ status: "ok" }))
+
+// ─── SSE endpoint (remplace polling) ───────────────────────────────────────
+app.get("/stream/:jobId", (req, res) => {
+  const { jobId } = req.params
+  res.setHeader("Content-Type", "text/event-stream")
+  res.setHeader("Cache-Control", "no-cache")
+  res.setHeader("Connection", "keep-alive")
+  res.setHeader("Access-Control-Allow-Origin", "*")
+  res.flushHeaders()
+
+  if (!sseClients[jobId]) sseClients[jobId] = []
+  sseClients[jobId].push(res)
+
+  // Envoie l'état actuel immédiatement si le job existe déjà
+  if (jobs[jobId]) res.write(`data: ${JSON.stringify(jobs[jobId])}\n\n`)
+
+  req.on("close", () => {
+    sseClients[jobId] = (sseClients[jobId] || []).filter(r => r !== res)
+    if (sseClients[jobId].length === 0) delete sseClients[jobId]
+  })
+})
 
 app.post("/upload", upload.single("file"), async (req, res) => {
   if (!req.file) return res.status(400).json({ error: "Aucun fichier" })
@@ -59,10 +95,7 @@ app.post("/thumbnail", async (req, res) => {
 app.post("/share", async (req, res) => {
   if (!supabase) return res.status(503).json({ error: "Supabase non configuré" })
   const { base64, storageUrl, name } = req.body
-  if (storageUrl) {
-    try { await navigator.clipboard.writeText(storageUrl) } catch {}
-    return res.json({ url: storageUrl })
-  }
+  if (storageUrl) return res.json({ url: storageUrl })
   if (!base64) return res.status(400).json({ error: "base64 ou storageUrl requis" })
   try {
     const data = base64.includes(",") ? base64.split(",")[1] : base64
@@ -143,6 +176,18 @@ app.get("/status/:jobId", (req, res) => {
   res.json(job)
 })
 
+// Nettoyage des jobs terminés après 30 minutes
+setInterval(() => {
+  const now = Date.now()
+  for (const jobId of Object.keys(jobs)) {
+    const job = jobs[jobId]
+    if ((job.status === "done" || job.status === "error") && job.completedAt && now - job.completedAt > 30 * 60 * 1000) {
+      delete jobs[jobId]
+      delete sseClients[jobId]
+    }
+  }
+}, 5 * 60 * 1000)
+
 // ─── HELPERS ───────────────────────────────────────────────────────────────
 
 async function extractKeyFrames(videoPath, count = 6) {
@@ -199,7 +244,7 @@ async function detectBeats(musicPath) {
       return { bpm: Math.round(60 / avgInterval), beats: beats.slice(0, 60) }
     }
     return { bpm: 120, beats }
-  } catch (e) { return { bpm: 120, beats: [] } }
+  } catch { return { bpm: 120, beats: [] } }
 }
 
 async function detectMainSubject(videoPath) {
@@ -215,7 +260,7 @@ async function detectMainSubject(videoPath) {
       model: "claude-sonnet-4-5", max_tokens: 200,
       messages: [{ role: "user", content: [
         { type: "image", source: { type: "base64", media_type: "image/jpeg", data: frameData } },
-        { type: "text", text: `Vidéo ${w}x${h}. Détecte le sujet principal (personne, visage, action). JSON brut: {"x_pct":0.5,"y_pct":0.3} où x_pct et y_pct sont le centre du sujet en % (0-1). Si pas de sujet: {"x_pct":0.5,"y_pct":0.5}` }
+        { type: "text", text: `Vidéo ${w}x${h}. Détecte le sujet principal. JSON brut: {"x_pct":0.5,"y_pct":0.3}` }
       ]}]
     })
     const text = response.content[0].type === "text" ? response.content[0].text : ""
@@ -304,20 +349,13 @@ function buildTextOverlayFilter(text, clipDuration, format, effect) {
   const fontSize = Math.floor(target.w * 0.07)
   const yPos = Math.floor(target.h * 0.5)
   const escapedText = text.replace(/'/g, "\\'").replace(/:/g, "\\:").replace(/\[/g, "\\[").replace(/\]/g, "\\]")
-
   switch (effect) {
-    case "slide":
-      return `drawtext=text='${escapedText}':fontsize=${fontSize}:fontcolor=white:x=(w-text_w)/2:y=${yPos}+h*0.08*(1-min(t/0.35,1)):alpha='min(t/0.25,1)':shadowcolor=black:shadowx=2:shadowy=2`
-    case "bounce":
-      return `drawtext=text='${escapedText}':fontsize=${fontSize}:fontcolor=white:x=(w-text_w)/2:y=${yPos}-abs(sin(t*10)*${Math.floor(fontSize*0.5)})*max(0,1-t/0.6):alpha='min(t/0.15,1)':shadowcolor=black:shadowx=2:shadowy=2`
-    case "typewriter":
-      return `drawtext=text='${escapedText}':fontsize=${fontSize}:fontcolor=white:x=(w-text_w)/2:y=${yPos}:alpha='if(lt(t,0.05),0,min((t-0.05)/0.3,1))':shadowcolor=black:shadowx=2:shadowy=2`
-    case "zoom":
-      return `drawtext=text='${escapedText}':fontsize=${fontSize}*(0.5+min(t/0.3,1)*0.5):fontcolor=white:x=(w-text_w)/2:y=${yPos}:alpha='min(t/0.2,1)':shadowcolor=black:shadowx=2:shadowy=2`
-    case "neon":
-      return `drawtext=text='${escapedText}':fontsize=${fontSize}:fontcolor=#00ff88:x=(w-text_w)/2:y=${yPos}:alpha='if(lt(t,0.3),t/0.3,if(gt(t,${(clipDuration-0.3).toFixed(2)}),(${clipDuration.toFixed(2)}-t)/0.3,1))':shadowcolor=#00ff88:shadowx=0:shadowy=0`
-    default:
-      return `drawtext=text='${escapedText}':fontsize=${fontSize}:fontcolor=white:x=(w-text_w)/2:y=${yPos}:alpha='if(lt(t,0.3),t/0.3,if(gt(t,${(clipDuration-0.3).toFixed(2)}),(${clipDuration.toFixed(2)}-t)/0.3,1))':shadowcolor=black:shadowx=2:shadowy=2`
+    case "slide":      return `drawtext=text='${escapedText}':fontsize=${fontSize}:fontcolor=white:x=(w-text_w)/2:y=${yPos}+h*0.08*(1-min(t/0.35,1)):alpha='min(t/0.25,1)':shadowcolor=black:shadowx=2:shadowy=2`
+    case "bounce":     return `drawtext=text='${escapedText}':fontsize=${fontSize}:fontcolor=white:x=(w-text_w)/2:y=${yPos}-abs(sin(t*10)*${Math.floor(fontSize*0.5)})*max(0,1-t/0.6):alpha='min(t/0.15,1)':shadowcolor=black:shadowx=2:shadowy=2`
+    case "typewriter": return `drawtext=text='${escapedText}':fontsize=${fontSize}:fontcolor=white:x=(w-text_w)/2:y=${yPos}:alpha='if(lt(t,0.05),0,min((t-0.05)/0.3,1))':shadowcolor=black:shadowx=2:shadowy=2`
+    case "zoom":       return `drawtext=text='${escapedText}':fontsize=${fontSize}*(0.5+min(t/0.3,1)*0.5):fontcolor=white:x=(w-text_w)/2:y=${yPos}:alpha='min(t/0.2,1)':shadowcolor=black:shadowx=2:shadowy=2`
+    case "neon":       return `drawtext=text='${escapedText}':fontsize=${fontSize}:fontcolor=#00ff88:x=(w-text_w)/2:y=${yPos}:alpha='if(lt(t,0.3),t/0.3,if(gt(t,${(clipDuration-0.3).toFixed(2)}),(${clipDuration.toFixed(2)}-t)/0.3,1))':shadowcolor=#00ff88:shadowx=0:shadowy=0`
+    default:           return `drawtext=text='${escapedText}':fontsize=${fontSize}:fontcolor=white:x=(w-text_w)/2:y=${yPos}:alpha='if(lt(t,0.3),t/0.3,if(gt(t,${(clipDuration-0.3).toFixed(2)}),(${clipDuration.toFixed(2)}-t)/0.3,1))':shadowcolor=black:shadowx=2:shadowy=2`
   }
 }
 
@@ -330,10 +368,10 @@ function buildStyledSubtitlesFilter(subtitles, clipStart, clipDuration, format, 
   const clipSubs = subtitles.filter(s => s.start >= clipStart && s.start < clipStart + clipDuration)
   if (!clipSubs.length) return null
   const styles = {
-    "tiktok":    { color:"white",  box:1, boxcolor:"black@0.6", boxborderw:8 },
-    "yellow":    { color:"yellow", box:1, boxcolor:"black@0.7", boxborderw:8 },
-    "white_box": { color:"black",  box:1, boxcolor:"white@0.9", boxborderw:10 },
-    "neon":      { color:"#00ff88", box:1, boxcolor:"black@0.5", boxborderw:6 },
+    "tiktok":    { color:"white",   box:1, boxcolor:"black@0.6",  boxborderw:8 },
+    "yellow":    { color:"yellow",  box:1, boxcolor:"black@0.7",  boxborderw:8 },
+    "white_box": { color:"black",   box:1, boxcolor:"white@0.9",  boxborderw:10 },
+    "neon":      { color:"#00ff88", box:1, boxcolor:"black@0.5",  boxborderw:6 },
   }
   const s = styles[style] || styles["tiktok"]
   return clipSubs.map(sub => {
@@ -366,7 +404,7 @@ async function analyzeEffects(prompt, totalDuration, options, zoomIntensity, spe
   try {
     const response = await anthropic.messages.create({
       model: "claude-sonnet-4-5", max_tokens: 600,
-      messages: [{ role: "user", content: `Expert montage vidéo TikTok. Prompt: "${prompt || "edit dynamique"}". Vidéo: ${Math.round(totalDuration)}s. Zoom max: ${zoomMax.toFixed(2)}, Speed max: ${speedMax.toFixed(2)}, Speed min: ${speedMin.toFixed(2)}. JSON brut: {"autozoom":{"enabled":${needsZoom},"intensity":${zoomMax.toFixed(2)}},"speedramp":{"enabled":${needsSpeedRamp},"segments":[{"start_pct":0,"end_pct":0.25,"speed":1.5},{"start_pct":0.25,"end_pct":0.6,"speed":0.7},{"start_pct":0.6,"end_pct":1.0,"speed":1.8}]}}` }]
+      messages: [{ role: "user", content: `Expert montage vidéo TikTok. Prompt: "${prompt || "edit dynamique"}". Vidéo: ${Math.round(totalDuration)}s. JSON brut: {"autozoom":{"enabled":${needsZoom},"intensity":${zoomMax.toFixed(2)}},"speedramp":{"enabled":${needsSpeedRamp},"segments":[{"start_pct":0,"end_pct":0.25,"speed":1.5},{"start_pct":0.25,"end_pct":0.6,"speed":0.7},{"start_pct":0.6,"end_pct":1.0,"speed":1.8}]}}` }]
     })
     const text = response.content[0].type === "text" ? response.content[0].text : ""
     return JSON.parse(text.replace(/```json\n?/g, "").replace(/```\n?/g, "").trim())
@@ -375,7 +413,6 @@ async function analyzeEffects(prompt, totalDuration, options, zoomIntensity, spe
   }
 }
 
-// Upload un fichier vers Supabase Storage et retourne l'URL publique
 async function uploadToStorage(filePath, storagePath, contentType) {
   if (!supabase || !fs.existsSync(filePath)) return null
   try {
@@ -395,7 +432,7 @@ async function processVideo({ jobId, videoUrls, videoPaths, prompt, options, mus
   const clips = []
 
   try {
-    jobs[jobId] = { status:"processing", progress:5 }
+    updateJob(jobId, { status:"processing", progress:5 })
 
     for (let i = 0; i < (videoUrls||[]).length; i++) {
       const url = videoUrls[i]
@@ -408,7 +445,7 @@ async function processVideo({ jobId, videoUrls, videoPaths, prompt, options, mus
     }
     for (const p of (videoPaths||[])) { if (fs.existsSync(p)) inputPaths.push(p) }
 
-    jobs[jobId].progress = 15
+    updateJob(jobId, { progress:15 })
 
     let mainInput = inputPaths[0]
     if (inputPaths.length > 1) {
@@ -421,12 +458,12 @@ async function processVideo({ jobId, videoUrls, videoPaths, prompt, options, mus
       mainInput = concatPath; fs.unlinkSync(listPath)
     }
 
-    jobs[jobId] = { ...jobs[jobId], progress:20, message:"Analyse du contenu par l'IA... 🔍" }
+    updateJob(jobId, { progress:20, message:"Analyse du contenu par l'IA... 🔍" })
 
     const keyFrames = await extractKeyFrames(mainInput, 8)
     const subjectPos = await detectMainSubject(mainInput)
 
-    jobs[jobId].progress = 25
+    updateJob(jobId, { progress:25 })
 
     if (stabilize) {
       try {
@@ -439,7 +476,7 @@ async function processVideo({ jobId, videoUrls, videoPaths, prompt, options, mus
       } catch (e) { console.error("Stabilisation:", e.message) }
     }
 
-    jobs[jobId].progress = 30
+    updateJob(jobId, { progress:30 })
 
     let musicPath = null
     if (musicUrl) {
@@ -454,42 +491,41 @@ async function processVideo({ jobId, videoUrls, videoPaths, prompt, options, mus
 
     let beatData = null
     if (options?.includes("Beat sync") && musicPath) {
-      jobs[jobId] = { ...jobs[jobId], progress:33, message:"Analyse du beat... 🎵" }
+      updateJob(jobId, { progress:33, message:"Analyse du beat... 🎵" })
       beatData = await detectBeats(musicPath)
-      console.log(`BPM: ${beatData.bpm}, ${beatData.beats.length} beats`)
     }
 
-    jobs[jobId].progress = 36
+    updateJob(jobId, { progress:36 })
 
     let subtitles = []
     if (options?.includes("Sous-titres")) {
-      jobs[jobId] = { ...jobs[jobId], progress:38, message:"Transcription audio... 📝" }
+      updateJob(jobId, { progress:38, message:"Transcription audio... 📝" })
       try {
         const transcript = await aai.transcripts.transcribe({ audio:mainInput, language_detection:true })
         if (transcript.words) subtitles = transcript.words.map(w => ({ text:w.text, start:w.start/1000, end:w.end/1000 }))
       } catch (e) { console.error("Transcription:", e.message) }
     }
 
-    jobs[jobId].progress = 40
+    updateJob(jobId, { progress:40 })
 
     const { stdout: durationStr } = await execAsync(`ffprobe -v quiet -show_entries format=duration -of csv=p=0 "${mainInput}"`)
     const totalDuration = parseFloat(durationStr.trim())
     const sceneCuts = await detectSceneCuts(mainInput)
     const effects = await analyzeEffects(prompt, totalDuration, options, zoomIntensity, speedIntensity)
 
-    jobs[jobId] = { ...jobs[jobId], progress:44, message:"L'IA choisit tes meilleures séquences... 🎬" }
+    updateJob(jobId, { progress:44, message:"L'IA choisit tes meilleures séquences... 🎬" })
 
     let durations = customTimestamps?.length > 0 ? customTimestamps : null
     if (!durations) {
       try {
-        const beatContext = beatData?.beats?.length > 0 ? `Beats réels à: ${beatData.beats.slice(0,20).join(", ")}s (BPM: ${beatData.bpm}). Aligne les start sur ces beats.` : ""
+        const beatContext = beatData?.beats?.length > 0 ? `Beats réels à: ${beatData.beats.slice(0,20).join(", ")}s (BPM: ${beatData.bpm}).` : ""
         const sceneContext = sceneCuts.length > 0 ? `Changements de scène à: ${sceneCuts.slice(0,10).map(t => t.toFixed(1)).join(", ")}s.` : ""
         const frameTimings = keyFrames.map((f, i) => `Frame ${i+1} à ${f.timestamp}s`).join(", ")
         const aiResponse = await anthropic.messages.create({
           model: "claude-sonnet-4-5", max_tokens: 1200,
           messages: [{ role:"user", content: [
             ...keyFrames.map(f => ({ type:"image", source:{ type:"base64", media_type:"image/jpeg", data:f.data } })),
-            { type:"text", text:`Expert montage TikTok. Frames: ${frameTimings}. Vidéo: ${Math.round(totalDuration)}s. Prompt: "${prompt || "edits dynamiques"}". ${beatContext} ${sceneContext} Génère les meilleurs clips basés sur l'analyse visuelle. JSON brut: [{"start":0,"duration":15,"name":"Edit #1"}]. Règles: start+duration<=${Math.round(totalDuration)}, durées 10-30s.` }
+            { type:"text", text:`Expert montage TikTok. Frames: ${frameTimings}. Vidéo: ${Math.round(totalDuration)}s. Prompt: "${prompt || "edits dynamiques"}". ${beatContext} ${sceneContext} JSON brut: [{"start":0,"duration":15,"name":"Edit #1"}]. Règles: start+duration<=${Math.round(totalDuration)}, durées 10-30s.` }
           ]}]
         })
         const aiText = aiResponse.content[0].type === "text" ? aiResponse.content[0].text : ""
@@ -505,7 +541,7 @@ async function processVideo({ jobId, videoUrls, videoPaths, prompt, options, mus
     }
     if (!durations) durations = [{ start:0, duration:15, name:"Edit #1" },{ start:10, duration:20, name:"Edit #2" },{ start:25, duration:15, name:"Edit #3" }]
 
-    jobs[jobId] = { ...jobs[jobId], progress:48, message:"Rendu des clips... ✨" }
+    updateJob(jobId, { progress:48, message:"Rendu des clips... ✨" })
 
     const targetFormat = format || "9:16"
     const { scale, crf, bitrate, codec } = getQualitySettings(exportQuality, exportCodec)
@@ -554,8 +590,8 @@ async function processVideo({ jobId, videoUrls, videoPaths, prompt, options, mus
       if (addIntroOutro) vfFilters.push(buildIntroOutroFilter(clip.duration, targetFormat))
 
       const vfString = vfFilters.join(",")
-
       const audioFilters = []
+
       if (atempoVal !== "1.0") {
         const speed = parseFloat(atempoVal)
         if (speed >= 0.5 && speed <= 2.0) audioFilters.push(`atempo=${speed}`)
@@ -598,21 +634,23 @@ async function processVideo({ jobId, videoUrls, videoPaths, prompt, options, mus
           .run()
       })
 
-      // Thumbnail
       const thumbPath = path.join(tmpDir, `thumb_${ci}_${Date.now()}.jpg`)
       try { await execAsync(`ffmpeg -i "${outputPath}" -ss 0.5 -vframes 1 -q:v 2 "${thumbPath}" -y 2>/dev/null`) } catch {}
 
-      // Upload vers Supabase Storage
       const uniqueId = `${Date.now()}_${ci}_${Math.random().toString(36).slice(2)}`
-      const storageUrl = await uploadToStorage(outputPath, `clips/${uniqueId}.mp4`, "video/mp4")
+
+      // Upload Storage — obligatoire, pas de fallback base64
+      let storageUrl = await uploadToStorage(outputPath, `clips/${uniqueId}.mp4`, "video/mp4")
       const thumbStorageUrl = await uploadToStorage(thumbPath, `thumbs/${uniqueId}.jpg`, "image/jpeg")
 
-      // Fallback base64 si Storage indispo
+      // Fallback base64 uniquement si Storage complètement indispo
       let base64 = null
-      let thumbBase64 = null
       if (!storageUrl) {
+        console.warn(`Storage upload failed for clip ${ci}, falling back to base64`)
         base64 = `data:video/mp4;base64,${fs.readFileSync(outputPath).toString("base64")}`
       }
+
+      let thumbBase64 = null
       if (!thumbStorageUrl && fs.existsSync(thumbPath)) {
         thumbBase64 = `data:image/jpeg;base64,${fs.readFileSync(thumbPath).toString("base64")}`
       }
@@ -628,18 +666,18 @@ async function processVideo({ jobId, videoUrls, videoPaths, prompt, options, mus
         duration: clip.duration,
       })
 
-      jobs[jobId].progress = 48 + Math.floor((ci+1) / durations.length * 52)
+      updateJob(jobId, { progress: 48 + Math.floor((ci+1) / durations.length * 52) })
     }
 
     if (musicPath && fs.existsSync(musicPath)) fs.unlinkSync(musicPath)
     for (const p of inputPaths) { if (fs.existsSync(p)) try { fs.unlinkSync(p) } catch {} }
 
-    jobs[jobId] = { status:"done", progress:100, clips }
+    updateJob(jobId, { status:"done", progress:100, clips, completedAt: Date.now() })
 
   } catch (err) {
     console.error(err)
     for (const p of inputPaths) { if (fs.existsSync(p)) try { fs.unlinkSync(p) } catch {} }
-    jobs[jobId] = { status:"error", progress:0, error:err.message }
+    updateJob(jobId, { status:"error", progress:0, error:err.message, completedAt: Date.now() })
   }
 }
 
