@@ -17,7 +17,7 @@ const execAsync = promisify(exec)
 ffmpeg.setFfmpegPath(ffmpegPath)
 
 const app = express()
-app.use(cors())
+app.use(cors({ origin: "*", credentials: true }))
 app.use(express.json({ limit: "100mb" }))
 
 const PORT = process.env.PORT || 3001
@@ -26,6 +26,11 @@ const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY })
 const supabase = process.env.SUPABASE_URL && process.env.SUPABASE_SERVICE_KEY
   ? createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_KEY, { realtime: { transport: ws } })
   : null
+
+const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID
+const GOOGLE_CLIENT_SECRET = process.env.GOOGLE_CLIENT_SECRET
+const GOOGLE_REDIRECT_URI = "https://climbclip-server.onrender.com/auth/google/callback"
+const FRONTEND_URL = "https://climbclip.vercel.app"
 
 const upload = multer({ dest: "/tmp/uploads/", limits: { fileSize: 2 * 1024 * 1024 * 1024 } })
 const jobs = {}
@@ -45,6 +50,98 @@ function updateJob(jobId, update) {
 }
 
 app.get("/health", (req, res) => res.json({ status: "ok" }))
+
+// ─── OAUTH GOOGLE DRIVE ────────────────────────────────────────────────────
+
+app.get("/auth/google", (req, res) => {
+  const { email } = req.query
+  const params = new URLSearchParams({
+    client_id: GOOGLE_CLIENT_ID,
+    redirect_uri: GOOGLE_REDIRECT_URI,
+    response_type: "code",
+    scope: "https://www.googleapis.com/auth/drive.file",
+    access_type: "offline",
+    prompt: "consent",
+    state: email || "",
+  })
+  res.redirect(`https://accounts.google.com/o/oauth2/v2/auth?${params}`)
+})
+
+app.get("/auth/google/callback", async (req, res) => {
+  const { code, state: email } = req.query
+  if (!code) return res.redirect(`${FRONTEND_URL}?drive_error=no_code`)
+  try {
+    const tokenRes = await axios.post("https://oauth2.googleapis.com/token", {
+      code, client_id: GOOGLE_CLIENT_ID, client_secret: GOOGLE_CLIENT_SECRET,
+      redirect_uri: GOOGLE_REDIRECT_URI, grant_type: "authorization_code",
+    })
+    const { refresh_token, access_token } = tokenRes.data
+    if (refresh_token && email && supabase) {
+      await supabase.from("google_tokens").upsert({ user_email: email, refresh_token, updated_at: new Date().toISOString() }, { onConflict: "user_email" })
+    }
+    res.redirect(`${FRONTEND_URL}?drive_connected=1`)
+  } catch (err) {
+    console.error("OAuth callback error:", err.message)
+    res.redirect(`${FRONTEND_URL}?drive_error=1`)
+  }
+})
+
+app.get("/auth/google/status", async (req, res) => {
+  const { email } = req.query
+  if (!email || !supabase) return res.json({ connected: false })
+  const { data } = await supabase.from("google_tokens").select("user_email").eq("user_email", email).single()
+  res.json({ connected: !!data })
+})
+
+app.post("/drive/upload", async (req, res) => {
+  const { email, storageUrl, fileName } = req.body
+  if (!email || !storageUrl) return res.status(400).json({ error: "email et storageUrl requis" })
+  if (!supabase) return res.status(503).json({ error: "Supabase non configuré" })
+  try {
+    const { data: tokenData } = await supabase.from("google_tokens").select("refresh_token").eq("user_email", email).single()
+    if (!tokenData?.refresh_token) return res.status(401).json({ error: "not_connected" })
+    const tokenRes = await axios.post("https://oauth2.googleapis.com/token", {
+      refresh_token: tokenData.refresh_token, client_id: GOOGLE_CLIENT_ID,
+      client_secret: GOOGLE_CLIENT_SECRET, grant_type: "refresh_token",
+    })
+    const accessToken = tokenRes.data.access_token
+    const videoRes = await axios({ url: storageUrl, method: "GET", responseType: "stream" })
+    const metadata = JSON.stringify({ name: fileName || "clip.mp4", mimeType: "video/mp4" })
+    const boundary = "-------climbclip_boundary"
+    const delimiter = `\r\n--${boundary}\r\n`
+    const closeDelimiter = `\r\n--${boundary}--`
+    const uploadRes = await axios({
+      method: "POST",
+      url: "https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart",
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        "Content-Type": `multipart/related; boundary="${boundary}"`,
+      },
+      data: Buffer.concat([
+        Buffer.from(`${delimiter}Content-Type: application/json\r\n\r\n${metadata}${delimiter}Content-Type: video/mp4\r\n\r\n`),
+        await streamToBuffer(videoRes.data),
+        Buffer.from(closeDelimiter),
+      ]),
+      maxContentLength: Infinity, maxBodyLength: Infinity,
+    })
+    res.json({ success: true, fileId: uploadRes.data.id, fileName: uploadRes.data.name })
+  } catch (err) {
+    console.error("Drive upload error:", err.message)
+    if (err.response?.status === 401) return res.status(401).json({ error: "not_connected" })
+    res.status(500).json({ error: err.message })
+  }
+})
+
+async function streamToBuffer(stream) {
+  return new Promise((resolve, reject) => {
+    const chunks = []
+    stream.on("data", chunk => chunks.push(chunk))
+    stream.on("end", () => resolve(Buffer.concat(chunks)))
+    stream.on("error", reject)
+  })
+}
+
+// ─── SSE ───────────────────────────────────────────────────────────────────
 
 app.get("/stream/:jobId", (req, res) => {
   const { jobId } = req.params
@@ -175,8 +272,7 @@ setInterval(() => {
   for (const jobId of Object.keys(jobs)) {
     const job = jobs[jobId]
     if ((job.status === "done" || job.status === "error") && job.completedAt && now - job.completedAt > 30 * 60 * 1000) {
-      delete jobs[jobId]
-      delete sseClients[jobId]
+      delete jobs[jobId]; delete sseClients[jobId]
     }
   }
 }, 5 * 60 * 1000)
@@ -397,10 +493,7 @@ function buildIntroOutroFilter(clipDuration, format) {
   const fontSize = Math.floor(target.w * 0.11)
   const introAlpha = `if(lt(t,1.2),t/1.2,if(lt(t,2.4),1,0))`
   const outroAlpha = `if(gt(t,${(clipDuration-1.5).toFixed(2)}),(t-${(clipDuration-1.5).toFixed(2)})/1.5,0)`
-  return [
-    `drawtext=text='CLIMB':fontsize=${fontSize}:fontcolor=white:x=(w-text_w)/2:y=(h-text_h)/2:alpha='${introAlpha}'`,
-    `drawtext=text='CLIMB':fontsize=${fontSize}:fontcolor=white:x=(w-text_w)/2:y=(h-text_h)/2:alpha='${outroAlpha}'`
-  ].join(",")
+  return [`drawtext=text='CLIMB':fontsize=${fontSize}:fontcolor=white:x=(w-text_w)/2:y=(h-text_h)/2:alpha='${introAlpha}'`, `drawtext=text='CLIMB':fontsize=${fontSize}:fontcolor=white:x=(w-text_w)/2:y=(h-text_h)/2:alpha='${outroAlpha}'`].join(",")
 }
 
 async function analyzeEffects(prompt, totalDuration, options, zoomIntensity, speedIntensity) {
@@ -408,8 +501,6 @@ async function analyzeEffects(prompt, totalDuration, options, zoomIntensity, spe
   const needsSpeedRamp = options?.includes("Speed ramp")
   if (!needsZoom && !needsSpeedRamp) return null
   const zoomMax = zoomIntensity ? 1 + (zoomIntensity/100)*0.3 : 1.15
-  const speedMax = speedIntensity ? 1 + (speedIntensity/100)*2 : 2.0
-  const speedMin = speedIntensity ? Math.max(0.3, 1-(speedIntensity/100)*0.7) : 0.6
   try {
     const response = await anthropic.messages.create({
       model: "claude-sonnet-4-5", max_tokens: 600,
@@ -502,7 +593,6 @@ async function processVideo({ jobId, videoUrls, videoPaths, prompt, options, mus
     if (options?.includes("Beat sync") && musicPath) {
       updateJob(jobId, { progress:31, message:"Analyse du beat... 🎵" })
       beatData = await detectBeats(musicPath)
-      console.log(`BPM: ${beatData.bpm}, ${beatData.beats.length} beats`)
     }
 
     updateJob(jobId, { progress:34 })
@@ -523,7 +613,6 @@ async function processVideo({ jobId, videoUrls, videoPaths, prompt, options, mus
     const sceneCuts = await detectSceneCuts(mainInput)
     const effects = await analyzeEffects(prompt, totalDuration, options, zoomIntensity, speedIntensity)
 
-    // Score segments par mouvement
     updateJob(jobId, { progress:42, message:"Détection du mouvement... 🎯" })
     const motionSegments = await scoreSegmentsByMotion(mainInput, totalDuration)
     const motionContext = motionSegments.slice(0,3).map(s => `${s.start.toFixed(1)}s-${(s.start+s.duration).toFixed(1)}s (score: ${s.motionScore})`).join(", ")
@@ -566,7 +655,6 @@ async function processVideo({ jobId, videoUrls, videoPaths, prompt, options, mus
     for (let ci = 0; ci < durations.length; ci++) {
       const clip = durations[ci]
       const outputPath = path.join(tmpDir, `clip_${ci}_${Date.now()}.mp4`)
-
       const vfFilters = []
       let atempoVal = "1.0"
 
@@ -586,7 +674,6 @@ async function processVideo({ jobId, videoUrls, videoPaths, prompt, options, mus
 
       const gradeFilter = getColorGradeFilter(colorGrade)
       if (gradeFilter) vfFilters.push(gradeFilter)
-
       vfFilters.push(`noise=alls=4:allf=t+u`)
       vfFilters.push(`vignette=PI/5`)
 
@@ -619,18 +706,11 @@ async function processVideo({ jobId, videoUrls, videoPaths, prompt, options, mus
       await new Promise((resolve, reject) => {
         let cmd = ffmpeg(mainInput).setStartTime(clip.start).setDuration(clip.duration)
         const outputOpts = [
-          "-movflags faststart",
-          `-c:v ${codec}`,
-          "-preset fast",
-          `-crf ${crf}`,
-          `-vf ${vfString}`,
+          "-movflags faststart", `-c:v ${codec}`, "-preset fast", `-crf ${crf}`, `-vf ${vfString}`,
           "-map_metadata -1",
-          `-metadata make="${metadata.make}"`,
-          `-metadata model="${metadata.model}"`,
-          `-metadata software="${metadata.software}"`,
-          `-metadata creation_time="${metadata.date}"`,
-          `-metadata com.apple.quicktime.make="${metadata.make}"`,
-          `-metadata com.apple.quicktime.model="${metadata.model}"`,
+          `-metadata make="${metadata.make}"`, `-metadata model="${metadata.model}"`,
+          `-metadata software="${metadata.software}"`, `-metadata creation_time="${metadata.date}"`,
+          `-metadata com.apple.quicktime.make="${metadata.make}"`, `-metadata com.apple.quicktime.model="${metadata.model}"`,
           `-b:v ${Math.floor(bitrate+Math.random()*500)}k`,
           `-maxrate ${Math.floor(bitrate*1.4+Math.random()*500)}k`,
           `-bufsize ${bitrate*2}k`,
@@ -669,14 +749,7 @@ async function processVideo({ jobId, videoUrls, videoPaths, prompt, options, mus
       if (fs.existsSync(thumbPath)) fs.unlinkSync(thumbPath)
       fs.unlinkSync(outputPath)
 
-      clips.push({
-        name: clip.name || `Edit #${ci+1}`,
-        base64,
-        storageUrl,
-        thumbnail: thumbStorageUrl || thumbBase64,
-        duration: clip.duration,
-      })
-
+      clips.push({ name: clip.name || `Edit #${ci+1}`, base64, storageUrl, thumbnail: thumbStorageUrl || thumbBase64, duration: clip.duration })
       updateJob(jobId, { progress: 48 + Math.floor((ci+1) / durations.length * 52) })
     }
 
