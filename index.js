@@ -29,9 +29,8 @@ const supabase = process.env.SUPABASE_URL && process.env.SUPABASE_SERVICE_KEY
 
 const upload = multer({ dest: "/tmp/uploads/", limits: { fileSize: 2 * 1024 * 1024 * 1024 } })
 const jobs = {}
-const sseClients = {} // jobId → [res, ...]
+const sseClients = {}
 
-// ─── SSE helper ────────────────────────────────────────────────────────────
 function pushSSE(jobId, data) {
   if (!sseClients[jobId]) return
   const msg = `data: ${JSON.stringify(data)}\n\n`
@@ -47,7 +46,6 @@ function updateJob(jobId, update) {
 
 app.get("/health", (req, res) => res.json({ status: "ok" }))
 
-// ─── SSE endpoint (remplace polling) ───────────────────────────────────────
 app.get("/stream/:jobId", (req, res) => {
   const { jobId } = req.params
   res.setHeader("Content-Type", "text/event-stream")
@@ -55,13 +53,9 @@ app.get("/stream/:jobId", (req, res) => {
   res.setHeader("Connection", "keep-alive")
   res.setHeader("Access-Control-Allow-Origin", "*")
   res.flushHeaders()
-
   if (!sseClients[jobId]) sseClients[jobId] = []
   sseClients[jobId].push(res)
-
-  // Envoie l'état actuel immédiatement si le job existe déjà
   if (jobs[jobId]) res.write(`data: ${JSON.stringify(jobs[jobId])}\n\n`)
-
   req.on("close", () => {
     sseClients[jobId] = (sseClients[jobId] || []).filter(r => r !== res)
     if (sseClients[jobId].length === 0) delete sseClients[jobId]
@@ -120,7 +114,7 @@ app.post("/preview-timestamps", async (req, res) => {
       model: "claude-sonnet-4-5", max_tokens: 1000,
       messages: [{ role: "user", content: [
         ...frames.map(f => ({ type: "image", source: { type: "base64", media_type: "image/jpeg", data: f.data } })),
-        { type: "text", text: `Éditeur vidéo expert. Vidéo: ${Math.round(totalDuration)}s. Prompt: "${prompt || "edits dynamiques"}". Analyse ces frames et génère les meilleurs timestamps. JSON brut: [{"start":0,"duration":15,"name":"Edit #1","description":"Description courte"}]` }
+        { type: "text", text: `Éditeur vidéo expert. Vidéo: ${Math.round(totalDuration)}s. Prompt: "${prompt || "edits dynamiques"}". JSON brut: [{"start":0,"duration":15,"name":"Edit #1","description":"Description courte"}]` }
       ]}]
     })
     const text = aiResponse.content[0].type === "text" ? aiResponse.content[0].text : "[]"
@@ -152,7 +146,7 @@ app.post("/analyze-video", async (req, res) => {
       model: "claude-sonnet-4-5", max_tokens: 800,
       messages: [{ role: "user", content: [
         ...frames.map(f => ({ type: "image", source: { type: "base64", media_type: "image/jpeg", data: f.data } })),
-        { type: "text", text: `Tu es un expert en montage vidéo TikTok/Instagram. Analyse ces frames de la vidéo (${Math.round(totalDuration)}s) et réponds en JSON brut sans backticks: {"contentType":"sport|lifestyle|gaming|music|travel","prompt":"prompt de montage optimisé en français","suggestedFormat":"9:16|16:9","energy":"high|medium|low","description":"description courte du contenu en français"}` }
+        { type: "text", text: `Tu es un expert en montage vidéo TikTok/Instagram. Analyse ces frames (${Math.round(totalDuration)}s) et réponds en JSON brut sans backticks: {"contentType":"sport|lifestyle|gaming|music|travel","prompt":"prompt optimisé en français","suggestedFormat":"9:16|16:9","energy":"high|medium|low","description":"description courte en français"}` }
       ]}]
     })
     const text = response.content[0].type === "text" ? response.content[0].text : "{}"
@@ -176,7 +170,6 @@ app.get("/status/:jobId", (req, res) => {
   res.json(job)
 })
 
-// Nettoyage des jobs terminés après 30 minutes
 setInterval(() => {
   const now = Date.now()
   for (const jobId of Object.keys(jobs)) {
@@ -214,8 +207,6 @@ async function extractKeyFrames(videoPath, count = 6) {
 
 async function detectBeats(musicPath) {
   try {
-    const { stdout: durationStr } = await execAsync(`ffprobe -v quiet -show_entries format=duration -of csv=p=0 "${musicPath}"`)
-    const duration = parseFloat(durationStr.trim())
     const tmpAudio = musicPath + "_beats.raw"
     await execAsync(`ffmpeg -i "${musicPath}" -ac 1 -ar 22050 -f f32le "${tmpAudio}" -y 2>/dev/null`)
     if (!fs.existsSync(tmpAudio)) return { bpm: 120, beats: [] }
@@ -266,6 +257,24 @@ async function detectMainSubject(videoPath) {
     const text = response.content[0].type === "text" ? response.content[0].text : ""
     return JSON.parse(text.replace(/```json\n?/g, "").replace(/```\n?/g, "").trim())
   } catch { return null }
+}
+
+async function scoreSegmentsByMotion(videoPath, totalDuration, count = 6) {
+  const segments = []
+  const segmentDuration = totalDuration / count
+  for (let i = 0; i < count; i++) {
+    const start = i * segmentDuration
+    try {
+      const { stdout: motionOut } = await execAsync(
+        `ffmpeg -ss ${start.toFixed(2)} -t ${segmentDuration.toFixed(2)} -i "${videoPath}" -vf "select='gt(scene,0.1)',metadata=print:file=-" -f null /dev/null 2>&1 | grep -c "lavfi.scene_score" || echo 0`
+      )
+      const motionScore = parseInt(motionOut.trim()) || 0
+      segments.push({ start, duration: segmentDuration, motionScore })
+    } catch {
+      segments.push({ start, duration: segmentDuration, motionScore: 0 })
+    }
+  }
+  return segments.sort((a, b) => b.motionScore - a.motionScore)
 }
 
 function getQualitySettings(exportQuality, exportCodec) {
@@ -463,7 +472,7 @@ async function processVideo({ jobId, videoUrls, videoPaths, prompt, options, mus
     const keyFrames = await extractKeyFrames(mainInput, 8)
     const subjectPos = await detectMainSubject(mainInput)
 
-    updateJob(jobId, { progress:25 })
+    updateJob(jobId, { progress:24 })
 
     if (stabilize) {
       try {
@@ -476,7 +485,7 @@ async function processVideo({ jobId, videoUrls, videoPaths, prompt, options, mus
       } catch (e) { console.error("Stabilisation:", e.message) }
     }
 
-    updateJob(jobId, { progress:30 })
+    updateJob(jobId, { progress:28 })
 
     let musicPath = null
     if (musicUrl) {
@@ -491,29 +500,35 @@ async function processVideo({ jobId, videoUrls, videoPaths, prompt, options, mus
 
     let beatData = null
     if (options?.includes("Beat sync") && musicPath) {
-      updateJob(jobId, { progress:33, message:"Analyse du beat... 🎵" })
+      updateJob(jobId, { progress:31, message:"Analyse du beat... 🎵" })
       beatData = await detectBeats(musicPath)
+      console.log(`BPM: ${beatData.bpm}, ${beatData.beats.length} beats`)
     }
 
-    updateJob(jobId, { progress:36 })
+    updateJob(jobId, { progress:34 })
 
     let subtitles = []
     if (options?.includes("Sous-titres")) {
-      updateJob(jobId, { progress:38, message:"Transcription audio... 📝" })
+      updateJob(jobId, { progress:36, message:"Transcription audio... 📝" })
       try {
         const transcript = await aai.transcripts.transcribe({ audio:mainInput, language_detection:true })
         if (transcript.words) subtitles = transcript.words.map(w => ({ text:w.text, start:w.start/1000, end:w.end/1000 }))
       } catch (e) { console.error("Transcription:", e.message) }
     }
 
-    updateJob(jobId, { progress:40 })
+    updateJob(jobId, { progress:38 })
 
     const { stdout: durationStr } = await execAsync(`ffprobe -v quiet -show_entries format=duration -of csv=p=0 "${mainInput}"`)
     const totalDuration = parseFloat(durationStr.trim())
     const sceneCuts = await detectSceneCuts(mainInput)
     const effects = await analyzeEffects(prompt, totalDuration, options, zoomIntensity, speedIntensity)
 
-    updateJob(jobId, { progress:44, message:"L'IA choisit tes meilleures séquences... 🎬" })
+    // Score segments par mouvement
+    updateJob(jobId, { progress:42, message:"Détection du mouvement... 🎯" })
+    const motionSegments = await scoreSegmentsByMotion(mainInput, totalDuration)
+    const motionContext = motionSegments.slice(0,3).map(s => `${s.start.toFixed(1)}s-${(s.start+s.duration).toFixed(1)}s (score: ${s.motionScore})`).join(", ")
+
+    updateJob(jobId, { progress:45, message:"L'IA choisit tes meilleures séquences... 🎬" })
 
     let durations = customTimestamps?.length > 0 ? customTimestamps : null
     if (!durations) {
@@ -525,7 +540,7 @@ async function processVideo({ jobId, videoUrls, videoPaths, prompt, options, mus
           model: "claude-sonnet-4-5", max_tokens: 1200,
           messages: [{ role:"user", content: [
             ...keyFrames.map(f => ({ type:"image", source:{ type:"base64", media_type:"image/jpeg", data:f.data } })),
-            { type:"text", text:`Expert montage TikTok. Frames: ${frameTimings}. Vidéo: ${Math.round(totalDuration)}s. Prompt: "${prompt || "edits dynamiques"}". ${beatContext} ${sceneContext} JSON brut: [{"start":0,"duration":15,"name":"Edit #1"}]. Règles: start+duration<=${Math.round(totalDuration)}, durées 10-30s.` }
+            { type:"text", text:`Expert montage TikTok. Frames: ${frameTimings}. Vidéo: ${Math.round(totalDuration)}s. Prompt: "${prompt || "edits dynamiques"}". ${beatContext} ${sceneContext} Segments avec le plus de mouvement: ${motionContext}. JSON brut: [{"start":0,"duration":15,"name":"Edit #1"}]. Règles: start+duration<=${Math.round(totalDuration)}, durées 10-30s.` }
           ]}]
         })
         const aiText = aiResponse.content[0].type === "text" ? aiResponse.content[0].text : ""
@@ -638,18 +653,14 @@ async function processVideo({ jobId, videoUrls, videoPaths, prompt, options, mus
       try { await execAsync(`ffmpeg -i "${outputPath}" -ss 0.5 -vframes 1 -q:v 2 "${thumbPath}" -y 2>/dev/null`) } catch {}
 
       const uniqueId = `${Date.now()}_${ci}_${Math.random().toString(36).slice(2)}`
-
-      // Upload Storage — obligatoire, pas de fallback base64
-      let storageUrl = await uploadToStorage(outputPath, `clips/${uniqueId}.mp4`, "video/mp4")
+      const storageUrl = await uploadToStorage(outputPath, `clips/${uniqueId}.mp4`, "video/mp4")
       const thumbStorageUrl = await uploadToStorage(thumbPath, `thumbs/${uniqueId}.jpg`, "image/jpeg")
 
-      // Fallback base64 uniquement si Storage complètement indispo
       let base64 = null
       if (!storageUrl) {
-        console.warn(`Storage upload failed for clip ${ci}, falling back to base64`)
+        console.warn(`Storage failed for clip ${ci}, fallback base64`)
         base64 = `data:video/mp4;base64,${fs.readFileSync(outputPath).toString("base64")}`
       }
-
       let thumbBase64 = null
       if (!thumbStorageUrl && fs.existsSync(thumbPath)) {
         thumbBase64 = `data:image/jpeg;base64,${fs.readFileSync(thumbPath).toString("base64")}`
