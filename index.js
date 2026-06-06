@@ -30,7 +30,7 @@ const supabase = process.env.SUPABASE_URL && process.env.SUPABASE_SERVICE_KEY
 const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID
 const GOOGLE_CLIENT_SECRET = process.env.GOOGLE_CLIENT_SECRET
 const GOOGLE_REDIRECT_URI = "https://climbclip-server.onrender.com/auth/google/callback"
-const FRONTEND_URL = "https://climbclip.vercel.app"
+const FRONTEND_URL = process.env.FRONTEND_URL || "https://climbclip.vercel.app"
 
 const upload = multer({ dest: "/tmp/uploads/", limits: { fileSize: 2 * 1024 * 1024 * 1024 } })
 const jobs = {}
@@ -70,9 +70,10 @@ app.get("/auth/google", (req, res) => {
 
 app.get("/auth/google/callback", async (req, res) => {
   const { code, state } = req.query
-  const { email, redirect: redirectUri } = JSON.parse(state || "{}")
+  let email, redirectUri
+  try { const parsed = JSON.parse(state || "{}"); email = parsed.email; redirectUri = parsed.redirect } catch {}
   const frontendUrl = redirectUri || FRONTEND_URL
-  if (!code) return res.redirect(`${frontendUrl}?drive_error=no_code`)
+  if (!code) return res.redirect(`${frontendUrl}#drive_error`)
   try {
     const tokenRes = await axios.post("https://oauth2.googleapis.com/token", {
       code, client_id: GOOGLE_CLIENT_ID, client_secret: GOOGLE_CLIENT_SECRET,
@@ -116,10 +117,7 @@ app.post("/drive/upload", async (req, res) => {
     const uploadRes = await axios({
       method: "POST",
       url: "https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart",
-      headers: {
-        Authorization: `Bearer ${accessToken}`,
-        "Content-Type": `multipart/related; boundary="${boundary}"`,
-      },
+      headers: { Authorization: `Bearer ${accessToken}`, "Content-Type": `multipart/related; boundary="${boundary}"` },
       data: Buffer.concat([
         Buffer.from(`${delimiter}Content-Type: application/json\r\n\r\n${metadata}${delimiter}Content-Type: video/mp4\r\n\r\n`),
         await streamToBuffer(videoRes.data),
@@ -209,7 +207,7 @@ app.post("/preview-timestamps", async (req, res) => {
     const mainInput = videoPaths[0]
     const { stdout: durationStr } = await execAsync(`ffprobe -v quiet -show_entries format=duration -of csv=p=0 "${mainInput}"`)
     const totalDuration = parseFloat(durationStr.trim())
-    const frames = await extractKeyFrames(mainInput, 6)
+    const frames = await extractKeyFrames(mainInput, 4)
     const aiResponse = await anthropic.messages.create({
       model: "claude-sonnet-4-5", max_tokens: 1000,
       messages: [{ role: "user", content: [
@@ -235,18 +233,34 @@ app.post("/prompt-help", async (req, res) => {
   } catch (err) { res.status(500).json({ error: err.message }) }
 })
 
+// ─── ANALYSE VIDÉO OPTIMISÉE (1 seul appel IA) ────────────────────────────
 app.post("/analyze-video", async (req, res) => {
   const { videoPath } = req.body
   if (!videoPath) return res.status(400).json({ error: "videoPath requis" })
   try {
-    const frames = await extractKeyFrames(videoPath, 8)
-    const { stdout: durationStr } = await execAsync(`ffprobe -v quiet -show_entries format=duration -of csv=p=0 "${videoPath}"`)
+    // 4 frames au lieu de 8 + sujet principal dans le même appel
+    const [frames, durationStr, probeOut] = await Promise.all([
+      extractKeyFrames(videoPath, 4),
+      execAsync(`ffprobe -v quiet -show_entries format=duration -of csv=p=0 "${videoPath}"`).then(r => r.stdout),
+      execAsync(`ffprobe -v quiet -select_streams v:0 -show_entries stream=width,height -of csv=p=0 "${videoPath}"`).then(r => r.stdout).catch(() => "1080,1920"),
+    ])
     const totalDuration = parseFloat(durationStr.trim())
+    const [w, h] = probeOut.trim().split(",").map(Number)
+
+    // 1 seul appel Claude pour tout analyser
     const response = await anthropic.messages.create({
-      model: "claude-sonnet-4-5", max_tokens: 800,
+      model: "claude-sonnet-4-5", max_tokens: 1000,
       messages: [{ role: "user", content: [
         ...frames.map(f => ({ type: "image", source: { type: "base64", media_type: "image/jpeg", data: f.data } })),
-        { type: "text", text: `Tu es un expert en montage vidéo TikTok/Instagram. Analyse ces frames (${Math.round(totalDuration)}s) et réponds en JSON brut sans backticks: {"contentType":"sport|lifestyle|gaming|music|travel","prompt":"prompt optimisé en français","suggestedFormat":"9:16|16:9","energy":"high|medium|low","description":"description courte en français"}` }
+        { type: "text", text: `Expert montage TikTok/Instagram. Vidéo ${w}x${h} (${Math.round(totalDuration)}s). Analyse et réponds en JSON brut sans backticks:
+{
+  "contentType": "sport|lifestyle|gaming|music|travel",
+  "prompt": "prompt de montage optimisé en français",
+  "suggestedFormat": "9:16|16:9",
+  "energy": "high|medium|low",
+  "description": "description courte en français",
+  "subject": {"x_pct": 0.5, "y_pct": 0.3}
+}` }
       ]}]
     })
     const text = response.content[0].type === "text" ? response.content[0].text : "{}"
@@ -282,26 +296,32 @@ setInterval(() => {
 
 // ─── HELPERS ───────────────────────────────────────────────────────────────
 
-async function extractKeyFrames(videoPath, count = 6) {
+async function extractKeyFrames(videoPath, count = 4) {
   const frames = []
   try {
     const { stdout: durationStr } = await execAsync(`ffprobe -v quiet -show_entries format=duration -of csv=p=0 "${videoPath}"`)
     const duration = parseFloat(durationStr.trim())
     const interval = duration / (count + 1)
+    const promises = []
     for (let i = 1; i <= count; i++) {
       const timestamp = (interval * i).toFixed(2)
       const framePath = path.join("/tmp", `frame_${Date.now()}_${i}.jpg`)
-      try {
-        await execAsync(`ffmpeg -i "${videoPath}" -ss ${timestamp} -vframes 1 -q:v 3 -vf "scale=480:-1" "${framePath}" -y 2>/dev/null`)
-        if (fs.existsSync(framePath)) {
-          const data = fs.readFileSync(framePath).toString("base64")
-          frames.push({ timestamp: parseFloat(timestamp), data })
-          fs.unlinkSync(framePath)
-        }
-      } catch {}
+      promises.push(
+        execAsync(`ffmpeg -i "${videoPath}" -ss ${timestamp} -vframes 1 -q:v 3 -vf "scale=320:-1" "${framePath}" -y 2>/dev/null`)
+          .then(() => {
+            if (fs.existsSync(framePath)) {
+              const data = fs.readFileSync(framePath).toString("base64")
+              fs.unlinkSync(framePath)
+              return { timestamp: parseFloat(timestamp), data }
+            }
+            return null
+          })
+          .catch(() => null)
+      )
     }
-  } catch (e) { console.error("extractKeyFrames:", e.message) }
-  return frames
+    const results = await Promise.all(promises)
+    return results.filter(Boolean)
+  } catch (e) { console.error("extractKeyFrames:", e.message); return [] }
 }
 
 async function detectBeats(musicPath) {
@@ -337,43 +357,20 @@ async function detectBeats(musicPath) {
   } catch { return { bpm: 120, beats: [] } }
 }
 
-async function detectMainSubject(videoPath) {
-  try {
-    const framePath = path.join("/tmp", `subject_${Date.now()}.jpg`)
-    await execAsync(`ffmpeg -i "${videoPath}" -ss 1 -vframes 1 -q:v 2 "${framePath}" -y 2>/dev/null`)
-    if (!fs.existsSync(framePath)) return null
-    const frameData = fs.readFileSync(framePath).toString("base64")
-    fs.unlinkSync(framePath)
-    const { stdout: probeOut } = await execAsync(`ffprobe -v quiet -select_streams v:0 -show_entries stream=width,height -of csv=p=0 "${videoPath}"`)
-    const [w, h] = probeOut.trim().split(",").map(Number)
-    const response = await anthropic.messages.create({
-      model: "claude-sonnet-4-5", max_tokens: 200,
-      messages: [{ role: "user", content: [
-        { type: "image", source: { type: "base64", media_type: "image/jpeg", data: frameData } },
-        { type: "text", text: `Vidéo ${w}x${h}. Détecte le sujet principal. JSON brut: {"x_pct":0.5,"y_pct":0.3}` }
-      ]}]
-    })
-    const text = response.content[0].type === "text" ? response.content[0].text : ""
-    return JSON.parse(text.replace(/```json\n?/g, "").replace(/```\n?/g, "").trim())
-  } catch { return null }
-}
-
 async function scoreSegmentsByMotion(videoPath, totalDuration, count = 6) {
   const segments = []
   const segmentDuration = totalDuration / count
+  const promises = []
   for (let i = 0; i < count; i++) {
     const start = i * segmentDuration
-    try {
-      const { stdout: motionOut } = await execAsync(
-        `ffmpeg -ss ${start.toFixed(2)} -t ${segmentDuration.toFixed(2)} -i "${videoPath}" -vf "select='gt(scene,0.1)',metadata=print:file=-" -f null /dev/null 2>&1 | grep -c "lavfi.scene_score" || echo 0`
-      )
-      const motionScore = parseInt(motionOut.trim()) || 0
-      segments.push({ start, duration: segmentDuration, motionScore })
-    } catch {
-      segments.push({ start, duration: segmentDuration, motionScore: 0 })
-    }
+    promises.push(
+      execAsync(`ffmpeg -ss ${start.toFixed(2)} -t ${segmentDuration.toFixed(2)} -i "${videoPath}" -vf "select='gt(scene,0.1)',metadata=print:file=-" -f null /dev/null 2>&1 | grep -c "lavfi.scene_score" || echo 0`)
+        .then(({ stdout }) => ({ start, duration: segmentDuration, motionScore: parseInt(stdout.trim()) || 0 }))
+        .catch(() => ({ start, duration: segmentDuration, motionScore: 0 }))
+    )
   }
-  return segments.sort((a, b) => b.motionScore - a.motionScore)
+  const results = await Promise.all(promises)
+  return results.sort((a, b) => b.motionScore - a.motionScore)
 }
 
 function getQualitySettings(exportQuality, exportCodec) {
@@ -506,8 +503,8 @@ async function analyzeEffects(prompt, totalDuration, options, zoomIntensity, spe
   const zoomMax = zoomIntensity ? 1 + (zoomIntensity/100)*0.3 : 1.15
   try {
     const response = await anthropic.messages.create({
-      model: "claude-sonnet-4-5", max_tokens: 600,
-      messages: [{ role: "user", content: `Expert montage vidéo TikTok. Prompt: "${prompt || "edit dynamique"}". Vidéo: ${Math.round(totalDuration)}s. JSON brut: {"autozoom":{"enabled":${needsZoom},"intensity":${zoomMax.toFixed(2)}},"speedramp":{"enabled":${needsSpeedRamp},"segments":[{"start_pct":0,"end_pct":0.25,"speed":1.5},{"start_pct":0.25,"end_pct":0.6,"speed":0.7},{"start_pct":0.6,"end_pct":1.0,"speed":1.8}]}}` }]
+      model: "claude-sonnet-4-5", max_tokens: 400,
+      messages: [{ role: "user", content: `Expert montage TikTok. Prompt: "${prompt || "edit dynamique"}". Vidéo: ${Math.round(totalDuration)}s. JSON brut: {"autozoom":{"enabled":${needsZoom},"intensity":${zoomMax.toFixed(2)}},"speedramp":{"enabled":${needsSpeedRamp},"segments":[{"start_pct":0,"end_pct":0.25,"speed":1.5},{"start_pct":0.25,"end_pct":0.6,"speed":0.7},{"start_pct":0.6,"end_pct":1.0,"speed":1.8}]}}` }]
     })
     const text = response.content[0].type === "text" ? response.content[0].text : ""
     return JSON.parse(text.replace(/```json\n?/g, "").replace(/```\n?/g, "").trim())
@@ -561,12 +558,16 @@ async function processVideo({ jobId, videoUrls, videoPaths, prompt, options, mus
       mainInput = concatPath; fs.unlinkSync(listPath)
     }
 
-    updateJob(jobId, { progress:20, message:"Analyse du contenu par l'IA... 🔍" })
+    updateJob(jobId, { progress:20, message:"Analyse du contenu... 🔍" })
 
-    const keyFrames = await extractKeyFrames(mainInput, 8)
-    const subjectPos = await detectMainSubject(mainInput)
+    // Tout en parallèle : frames + durée + stabilisation check
+    const { stdout: durationStr } = await execAsync(`ffprobe -v quiet -show_entries format=duration -of csv=p=0 "${mainInput}"`)
+    const totalDuration = parseFloat(durationStr.trim())
 
-    updateJob(jobId, { progress:24 })
+    // 4 frames en parallèle
+    const keyFrames = await extractKeyFrames(mainInput, 4)
+
+    updateJob(jobId, { progress:25 })
 
     if (stabilize) {
       try {
@@ -592,60 +593,63 @@ async function processVideo({ jobId, videoUrls, videoPaths, prompt, options, mus
       } catch { musicPath = null }
     }
 
-    let beatData = null
-    if (options?.includes("Beat sync") && musicPath) {
-      updateJob(jobId, { progress:31, message:"Analyse du beat... 🎵" })
-      beatData = await detectBeats(musicPath)
-    }
-
-    updateJob(jobId, { progress:34 })
+    // Beat + scènes + motion + effets en parallèle
+    updateJob(jobId, { progress:32, message:"Analyse audio et mouvement... 🎵" })
+    const [beatData, sceneCuts, motionSegments, effects] = await Promise.all([
+      options?.includes("Beat sync") && musicPath ? detectBeats(musicPath) : Promise.resolve(null),
+      detectSceneCuts(mainInput),
+      scoreSegmentsByMotion(mainInput, totalDuration),
+      analyzeEffects(prompt, totalDuration, options, zoomIntensity, speedIntensity),
+    ])
 
     let subtitles = []
     if (options?.includes("Sous-titres")) {
-      updateJob(jobId, { progress:36, message:"Transcription audio... 📝" })
+      updateJob(jobId, { progress:38, message:"Transcription audio... 📝" })
       try {
         const transcript = await aai.transcripts.transcribe({ audio:mainInput, language_detection:true })
         if (transcript.words) subtitles = transcript.words.map(w => ({ text:w.text, start:w.start/1000, end:w.end/1000 }))
       } catch (e) { console.error("Transcription:", e.message) }
     }
 
-    updateJob(jobId, { progress:38 })
+    updateJob(jobId, { progress:42, message:"L'IA choisit tes meilleures séquences... 🎬" })
 
-    const { stdout: durationStr } = await execAsync(`ffprobe -v quiet -show_entries format=duration -of csv=p=0 "${mainInput}"`)
-    const totalDuration = parseFloat(durationStr.trim())
-    const sceneCuts = await detectSceneCuts(mainInput)
-    const effects = await analyzeEffects(prompt, totalDuration, options, zoomIntensity, speedIntensity)
-
-    updateJob(jobId, { progress:42, message:"Détection du mouvement... 🎯" })
-    const motionSegments = await scoreSegmentsByMotion(mainInput, totalDuration)
-    const motionContext = motionSegments.slice(0,3).map(s => `${s.start.toFixed(1)}s-${(s.start+s.duration).toFixed(1)}s (score: ${s.motionScore})`).join(", ")
-
-    updateJob(jobId, { progress:45, message:"L'IA choisit tes meilleures séquences... 🎬" })
-
+    // 1 seul appel IA pour timestamps + sujet
     let durations = customTimestamps?.length > 0 ? customTimestamps : null
+    let subjectPos = null
+
     if (!durations) {
       try {
-        const beatContext = beatData?.beats?.length > 0 ? `Beats réels à: ${beatData.beats.slice(0,20).join(", ")}s (BPM: ${beatData.bpm}).` : ""
-        const sceneContext = sceneCuts.length > 0 ? `Changements de scène à: ${sceneCuts.slice(0,10).map(t => t.toFixed(1)).join(", ")}s.` : ""
+        const beatContext = beatData?.beats?.length > 0 ? `Beats à: ${beatData.beats.slice(0,15).join(", ")}s (BPM: ${beatData.bpm}).` : ""
+        const sceneContext = sceneCuts.length > 0 ? `Scènes à: ${sceneCuts.slice(0,8).map(t => t.toFixed(1)).join(", ")}s.` : ""
+        const motionContext = motionSegments.slice(0,3).map(s => `${s.start.toFixed(1)}s (score: ${s.motionScore})`).join(", ")
         const frameTimings = keyFrames.map((f, i) => `Frame ${i+1} à ${f.timestamp}s`).join(", ")
+
         const aiResponse = await anthropic.messages.create({
           model: "claude-sonnet-4-5", max_tokens: 1200,
           messages: [{ role:"user", content: [
             ...keyFrames.map(f => ({ type:"image", source:{ type:"base64", media_type:"image/jpeg", data:f.data } })),
-            { type:"text", text:`Expert montage TikTok. Frames: ${frameTimings}. Vidéo: ${Math.round(totalDuration)}s. Prompt: "${prompt || "edits dynamiques"}". ${beatContext} ${sceneContext} Segments avec le plus de mouvement: ${motionContext}. JSON brut: [{"start":0,"duration":15,"name":"Edit #1"}]. Règles: start+duration<=${Math.round(totalDuration)}, durées 10-30s.` }
+            { type:"text", text:`Expert montage TikTok. Frames: ${frameTimings}. Vidéo: ${Math.round(totalDuration)}s. Prompt: "${prompt || "edits dynamiques"}". ${beatContext} ${sceneContext} Meilleur mouvement: ${motionContext}.
+Réponds en JSON brut:
+{
+  "timestamps": [{"start":0,"duration":15,"name":"Edit #1"}],
+  "subject": {"x_pct":0.5,"y_pct":0.3}
+}
+Règles timestamps: start+duration<=${Math.round(totalDuration)}, durées 10-30s.` }
           ]}]
         })
         const aiText = aiResponse.content[0].type === "text" ? aiResponse.content[0].text : ""
         const parsed = JSON.parse(aiText.replace(/```json\n?/g, "").replace(/```\n?/g, "").trim())
-        if (Array.isArray(parsed) && parsed.length > 0) {
-          durations = parsed.map((d, i) => ({
+        if (parsed.timestamps && Array.isArray(parsed.timestamps) && parsed.timestamps.length > 0) {
+          durations = parsed.timestamps.map((d, i) => ({
             start: Math.max(0, Math.min(d.start, totalDuration-(d.duration||15))),
             duration: Math.min(d.duration||15, totalDuration),
             name: d.name || `Edit #${i+1}`
           }))
         }
+        if (parsed.subject) subjectPos = parsed.subject
       } catch (e) { console.error("Erreur IA clips:", e.message) }
     }
+
     if (!durations) durations = [{ start:0, duration:15, name:"Edit #1" },{ start:10, duration:20, name:"Edit #2" },{ start:25, duration:15, name:"Edit #3" }]
 
     updateJob(jobId, { progress:48, message:"Rendu des clips... ✨" })
