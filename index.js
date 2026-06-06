@@ -233,12 +233,10 @@ app.post("/prompt-help", async (req, res) => {
   } catch (err) { res.status(500).json({ error: err.message }) }
 })
 
-// ─── ANALYSE VIDÉO OPTIMISÉE (1 seul appel IA) ────────────────────────────
 app.post("/analyze-video", async (req, res) => {
   const { videoPath } = req.body
   if (!videoPath) return res.status(400).json({ error: "videoPath requis" })
   try {
-    // 4 frames au lieu de 8 + sujet principal dans le même appel
     const [frames, durationStr, probeOut] = await Promise.all([
       extractKeyFrames(videoPath, 4),
       execAsync(`ffprobe -v quiet -show_entries format=duration -of csv=p=0 "${videoPath}"`).then(r => r.stdout),
@@ -246,8 +244,6 @@ app.post("/analyze-video", async (req, res) => {
     ])
     const totalDuration = parseFloat(durationStr.trim())
     const [w, h] = probeOut.trim().split(",").map(Number)
-
-    // 1 seul appel Claude pour tout analyser
     const response = await anthropic.messages.create({
       model: "claude-sonnet-4-5", max_tokens: 1000,
       messages: [{ role: "user", content: [
@@ -270,12 +266,12 @@ app.post("/analyze-video", async (req, res) => {
 })
 
 app.post("/generate", async (req, res) => {
-  const { videoUrls, videoPaths, prompt, options, musicUrl, format, zoomIntensity, speedIntensity, addIntroOutro, customTimestamps, colorGrade, transition, textOverlay, textEffect, stabilize, vocalVolume, watermark, exportQuality, exportCodec, subtitleStyle } = req.body
+  const { videoUrls, videoPaths, prompt, options, musicUrl, format, zoomIntensity, speedIntensity, addIntroOutro, customTimestamps, colorGrade, transition, textOverlay, textEffect, stabilize, vocalVolume, watermark, exportQuality, exportCodec, subtitleStyle, capsulesCount, isCapsule } = req.body
   if (!videoUrls?.length && !videoPaths?.length) return res.status(400).json({ error: "Aucune vidéo" })
   const jobId = `job_${Date.now()}`
   jobs[jobId] = { status: "processing", progress: 0, clips: null, error: null }
   res.json({ jobId })
-  processVideo({ jobId, videoUrls, videoPaths, prompt, options, musicUrl, format, zoomIntensity, speedIntensity, addIntroOutro, customTimestamps, colorGrade, transition, textOverlay, textEffect, stabilize, vocalVolume, watermark, exportQuality, exportCodec, subtitleStyle })
+  processVideo({ jobId, videoUrls, videoPaths, prompt, options, musicUrl, format, zoomIntensity, speedIntensity, addIntroOutro, customTimestamps, colorGrade, transition, textOverlay, textEffect, stabilize, vocalVolume, watermark, exportQuality, exportCodec, subtitleStyle, capsulesCount, isCapsule })
 })
 
 app.get("/status/:jobId", (req, res) => {
@@ -358,7 +354,6 @@ async function detectBeats(musicPath) {
 }
 
 async function scoreSegmentsByMotion(videoPath, totalDuration, count = 6) {
-  const segments = []
   const segmentDuration = totalDuration / count
   const promises = []
   for (let i = 0; i < count; i++) {
@@ -524,9 +519,26 @@ async function uploadToStorage(filePath, storagePath, contentType) {
   } catch (e) { console.error("uploadToStorage:", e.message); return null }
 }
 
+// ─── GÉNÉRATION CAPSULES (bypass duplicate detection) ──────────────────────
+
+function buildCapsuleTimestamps(totalDuration, count) {
+  const capsules = []
+  for (let i = 0; i < count; i++) {
+    // Décalage aléatoire entre 0.3s et 2s pour chaque capsule
+    const offset = 0.3 + (Math.random() * 1.7) + (i * 0.5)
+    const start = Math.min(offset, totalDuration * 0.05)
+    // Durée = quasi-totalité de la vidéo moins le début décalé
+    const duration = Math.max(totalDuration - start - 0.1, totalDuration * 0.85)
+    if (start + duration <= totalDuration) {
+      capsules.push({ start: parseFloat(start.toFixed(2)), duration: parseFloat(duration.toFixed(2)), name: `Capsule #${i+1}` })
+    }
+  }
+  return capsules
+}
+
 // ─── MAIN PROCESS ──────────────────────────────────────────────────────────
 
-async function processVideo({ jobId, videoUrls, videoPaths, prompt, options, musicUrl, format, zoomIntensity, speedIntensity, addIntroOutro, customTimestamps, colorGrade, transition, textOverlay, textEffect, stabilize, vocalVolume, watermark, exportQuality, exportCodec, subtitleStyle }) {
+async function processVideo({ jobId, videoUrls, videoPaths, prompt, options, musicUrl, format, zoomIntensity, speedIntensity, addIntroOutro, customTimestamps, colorGrade, transition, textOverlay, textEffect, stabilize, vocalVolume, watermark, exportQuality, exportCodec, subtitleStyle, capsulesCount, isCapsule }) {
   const tmpDir = "/tmp"
   const inputPaths = []
   const clips = []
@@ -558,13 +570,68 @@ async function processVideo({ jobId, videoUrls, videoPaths, prompt, options, mus
       mainInput = concatPath; fs.unlinkSync(listPath)
     }
 
-    updateJob(jobId, { progress:20, message:"Analyse du contenu... 🔍" })
-
-    // Tout en parallèle : frames + durée + stabilisation check
     const { stdout: durationStr } = await execAsync(`ffprobe -v quiet -show_entries format=duration -of csv=p=0 "${mainInput}"`)
     const totalDuration = parseFloat(durationStr.trim())
 
-    // 4 frames en parallèle
+    // ─── MODE CAPSULE : pas d'analyse IA, juste des décalages ──────────────
+    if (isCapsule) {
+      updateJob(jobId, { progress:30, message:"Génération des capsules... 📦" })
+      const count = capsulesCount || 4
+      const durations = buildCapsuleTimestamps(totalDuration, count)
+      const targetFormat = format || "9:16"
+      const { scale, crf, bitrate, codec } = getQualitySettings(exportQuality, exportCodec)
+      const formatFilter = getFormatFilter(targetFormat, scale)
+      const metadata = getNativeMetadata()
+
+      for (let ci = 0; ci < durations.length; ci++) {
+        const clip = durations[ci]
+        const outputPath = path.join(tmpDir, `clip_${ci}_${Date.now()}.mp4`)
+
+        await new Promise((resolve, reject) => {
+          const outputOpts = [
+            "-movflags faststart", `-c:v ${codec}`, "-preset fast", `-crf ${crf}`,
+            `-vf ${formatFilter}`,
+            "-map_metadata -1",
+            `-metadata make="${metadata.make}"`, `-metadata model="${metadata.model}"`,
+            `-metadata software="${metadata.software}"`, `-metadata creation_time="${metadata.date}"`,
+            `-b:v ${Math.floor(bitrate+Math.random()*500)}k`,
+            `-maxrate ${Math.floor(bitrate*1.4+Math.random()*500)}k`,
+            `-bufsize ${bitrate*2}k`,
+            "-c:a aac", "-b:a 192k",
+          ]
+          ffmpeg(mainInput).setStartTime(clip.start).setDuration(clip.duration)
+            .outputOptions(outputOpts).output(outputPath)
+            .on("end", resolve)
+            .on("error", (err, stdout, stderr) => { console.error("FFmpeg capsule:", stderr?.slice(-300)); reject(err) })
+            .run()
+        })
+
+        const thumbPath = path.join(tmpDir, `thumb_${ci}_${Date.now()}.jpg`)
+        try { await execAsync(`ffmpeg -i "${outputPath}" -ss 0.5 -vframes 1 -q:v 2 "${thumbPath}" -y 2>/dev/null`) } catch {}
+
+        const uniqueId = `${Date.now()}_${ci}_${Math.random().toString(36).slice(2)}`
+        const storageUrl = await uploadToStorage(outputPath, `clips/${uniqueId}.mp4`, "video/mp4")
+        const thumbStorageUrl = await uploadToStorage(thumbPath, `thumbs/${uniqueId}.jpg`, "image/jpeg")
+
+        let base64 = null
+        if (!storageUrl) base64 = `data:video/mp4;base64,${fs.readFileSync(outputPath).toString("base64")}`
+        let thumbBase64 = null
+        if (!thumbStorageUrl && fs.existsSync(thumbPath)) thumbBase64 = `data:image/jpeg;base64,${fs.readFileSync(thumbPath).toString("base64")}`
+
+        if (fs.existsSync(thumbPath)) fs.unlinkSync(thumbPath)
+        fs.unlinkSync(outputPath)
+
+        clips.push({ name: clip.name, base64, storageUrl, thumbnail: thumbStorageUrl || thumbBase64, duration: clip.duration })
+        updateJob(jobId, { progress: 30 + Math.floor((ci+1) / durations.length * 70) })
+      }
+
+      for (const p of inputPaths) { if (fs.existsSync(p)) try { fs.unlinkSync(p) } catch {} }
+      updateJob(jobId, { status:"done", progress:100, clips, completedAt: Date.now() })
+      return
+    }
+
+    // ─── MODE NORMAL ────────────────────────────────────────────────────────
+    updateJob(jobId, { progress:20, message:"Analyse du contenu... 🔍" })
     const keyFrames = await extractKeyFrames(mainInput, 4)
 
     updateJob(jobId, { progress:25 })
@@ -593,7 +660,6 @@ async function processVideo({ jobId, videoUrls, videoPaths, prompt, options, mus
       } catch { musicPath = null }
     }
 
-    // Beat + scènes + motion + effets en parallèle
     updateJob(jobId, { progress:32, message:"Analyse audio et mouvement... 🎵" })
     const [beatData, sceneCuts, motionSegments, effects] = await Promise.all([
       options?.includes("Beat sync") && musicPath ? detectBeats(musicPath) : Promise.resolve(null),
@@ -613,7 +679,6 @@ async function processVideo({ jobId, videoUrls, videoPaths, prompt, options, mus
 
     updateJob(jobId, { progress:42, message:"L'IA choisit tes meilleures séquences... 🎬" })
 
-    // 1 seul appel IA pour timestamps + sujet
     let durations = customTimestamps?.length > 0 ? customTimestamps : null
     let subjectPos = null
 
@@ -749,9 +814,7 @@ Règles timestamps: start+duration<=${Math.round(totalDuration)}, durées 10-30s
         base64 = `data:video/mp4;base64,${fs.readFileSync(outputPath).toString("base64")}`
       }
       let thumbBase64 = null
-      if (!thumbStorageUrl && fs.existsSync(thumbPath)) {
-        thumbBase64 = `data:image/jpeg;base64,${fs.readFileSync(thumbPath).toString("base64")}`
-      }
+      if (!thumbStorageUrl && fs.existsSync(thumbPath)) thumbBase64 = `data:image/jpeg;base64,${fs.readFileSync(thumbPath).toString("base64")}`
 
       if (fs.existsSync(thumbPath)) fs.unlinkSync(thumbPath)
       fs.unlinkSync(outputPath)
