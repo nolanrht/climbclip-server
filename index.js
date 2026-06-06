@@ -54,7 +54,8 @@ app.get("/health", (req, res) => res.json({ status: "ok" }))
 // ─── OAUTH GOOGLE DRIVE ────────────────────────────────────────────────────
 
 app.get("/auth/google", (req, res) => {
-  const { email } = req.query
+  const { email, redirect } = req.query
+  const redirectUri = redirect || FRONTEND_URL
   const params = new URLSearchParams({
     client_id: GOOGLE_CLIENT_ID,
     redirect_uri: GOOGLE_REDIRECT_URI,
@@ -62,27 +63,29 @@ app.get("/auth/google", (req, res) => {
     scope: "https://www.googleapis.com/auth/drive.file",
     access_type: "offline",
     prompt: "consent",
-    state: email || "",
+    state: JSON.stringify({ email, redirect: redirectUri }),
   })
   res.redirect(`https://accounts.google.com/o/oauth2/v2/auth?${params}`)
 })
 
 app.get("/auth/google/callback", async (req, res) => {
-  const { code, state: email } = req.query
-  if (!code) return res.redirect(`${FRONTEND_URL}?drive_error=no_code`)
+  const { code, state } = req.query
+  const { email, redirect: redirectUri } = JSON.parse(state || "{}")
+  const frontendUrl = redirectUri || FRONTEND_URL
+  if (!code) return res.redirect(`${frontendUrl}?drive_error=no_code`)
   try {
     const tokenRes = await axios.post("https://oauth2.googleapis.com/token", {
       code, client_id: GOOGLE_CLIENT_ID, client_secret: GOOGLE_CLIENT_SECRET,
       redirect_uri: GOOGLE_REDIRECT_URI, grant_type: "authorization_code",
     })
-    const { refresh_token, access_token } = tokenRes.data
+    const { refresh_token } = tokenRes.data
     if (refresh_token && email && supabase) {
       await supabase.from("google_tokens").upsert({ user_email: email, refresh_token, updated_at: new Date().toISOString() }, { onConflict: "user_email" })
     }
-    res.redirect(`${FRONTEND_URL}?drive_connected=1`)
+    res.redirect(`${frontendUrl}#drive_connected`)
   } catch (err) {
     console.error("OAuth callback error:", err.message)
-    res.redirect(`${FRONTEND_URL}?drive_error=1`)
+    res.redirect(`${frontendUrl}#drive_error`)
   }
 })
 
