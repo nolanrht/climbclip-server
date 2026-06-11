@@ -1,5 +1,7 @@
 const express = require("express")
 const cors = require("cors")
+const helmet = require("helmet")
+const rateLimit = require("express-rate-limit")
 const ffmpeg = require("fluent-ffmpeg")
 const ffmpegPath = require("@ffmpeg-installer/ffmpeg").path
 const axios = require("axios")
@@ -16,9 +18,70 @@ const execAsync = promisify(exec)
 
 ffmpeg.setFfmpegPath(ffmpegPath)
 
+const ALLOWED_ORIGINS = [
+  "https://climbclip.vercel.app",
+  "http://localhost:3000",
+  "http://localhost:3001",
+]
+
 const app = express()
-app.use(cors({ origin: "*", credentials: true }))
-app.use(express.json({ limit: "100mb" }))
+app.use(helmet({ crossOriginResourcePolicy: false }))
+app.use(cors({
+  origin: (origin, cb) => {
+    if (!origin || ALLOWED_ORIGINS.includes(origin)) cb(null, true)
+    else cb(new Error("Not allowed by CORS"))
+  },
+  credentials: true,
+}))
+app.use(express.json({ limit: "50mb" }))
+
+// ─── RATE LIMITING ──────────────────────────────────────────────────────────
+const generateLimiter = rateLimit({ windowMs: 60_000, max: 10, standardHeaders: true, legacyHeaders: false, message: { error: "Trop de requêtes — réessaie dans une minute." } })
+const uploadLimiter   = rateLimit({ windowMs: 60_000, max: 20, standardHeaders: true, legacyHeaders: false })
+const genericLimiter  = rateLimit({ windowMs: 60_000, max: 30, standardHeaders: true, legacyHeaders: false })
+
+// ─── INPUT SANITIZATION HELPERS ─────────────────────────────────────────────
+function sanitizeVideoPath(p) {
+  if (typeof p !== "string") return null
+  const resolved = path.resolve(p)
+  if (!resolved.startsWith("/tmp/")) return null
+  return resolved
+}
+
+function sanitizeUrl(url) {
+  if (typeof url !== "string") return null
+  try {
+    const u = new URL(url)
+    if (!["http:", "https:"].includes(u.protocol)) return null
+    if (/[`$;&|<>(){}\\!]/.test(url)) return null
+    return url
+  } catch { return null }
+}
+
+function sanitizeText(text, maxLen = 500) {
+  if (typeof text !== "string") return ""
+  return text.slice(0, maxLen).replace(/[<>]/g, "")
+}
+
+function sanitizeFormat(f) {
+  return ["9:16","16:9","1:1","4:5"].includes(f) ? f : "9:16"
+}
+
+function sanitizeExportQuality(q) {
+  return ["720p","1080p","4K"].includes(q) ? q : "1080p"
+}
+
+function sanitizeExportCodec(c) {
+  return ["H264","H265","VP9"].includes(c) ? c : "H264"
+}
+
+function sanitizeColorGrade(g) {
+  return ["none","cinematic","orange_teal","bw","vibrant","moody","warm","cold"].includes(g) ? g : "none"
+}
+
+function sanitizeTransition(t) {
+  return ["none","fade","flash","glitch","zoom_in"].includes(t) ? t : "none"
+}
 
 const PORT = process.env.PORT || 3001
 const aai = new AssemblyAI({ apiKey: process.env.ASSEMBLYAI_API_KEY })
@@ -138,48 +201,6 @@ app.get("/auth/google/status", async (req, res) => {
   }
 })
 
-app.get("/debug/drive-config", (req, res) => {
-  const rawUrl = process.env.SUPABASE_URL || ""
-  res.json({
-    supabase_initialized: !!supabase,
-    supabase_url_raw: rawUrl,
-    supabase_url_used: SUPABASE_URL,
-    google_client_id: !!GOOGLE_CLIENT_ID,
-    google_client_secret: !!GOOGLE_CLIENT_SECRET,
-    redirect_uri: GOOGLE_REDIRECT_URI,
-    frontend_url: FRONTEND_URL,
-  })
-})
-
-app.get("/debug/test-upsert", async (req, res) => {
-  if (!supabase) return res.json({ ok: false, error: "supabase not initialized" })
-
-  const results = {}
-
-  // 1. Simple SELECT
-  const { data: selectData, error: selectErr } = await supabase.from("google_tokens").select("*").limit(1)
-  results.select = selectErr ? { ok: false, code: selectErr.code, error: selectErr.message } : { ok: true, rows: selectData?.length }
-
-  // 2. Simple INSERT (no conflict handling)
-  const { error: insertErr } = await supabase.from("google_tokens")
-    .insert({ user_email: "debug-test@climbclip.io", refresh_token: "debug_token" })
-  results.insert = insertErr ? { ok: false, code: insertErr.code, error: insertErr.message } : { ok: true }
-
-  // 3. Upsert without onConflict
-  const { error: upsertNoConflict } = await supabase.from("google_tokens")
-    .upsert({ user_email: "debug-test2@climbclip.io", refresh_token: "debug_token" })
-  results.upsert_no_conflict = upsertNoConflict ? { ok: false, code: upsertNoConflict.code, error: upsertNoConflict.message } : { ok: true }
-
-  // 4. Upsert with onConflict
-  const { error: upsertConflict } = await supabase.from("google_tokens")
-    .upsert({ user_email: "debug-test@climbclip.io", refresh_token: "debug_token_2" }, { onConflict: "user_email" })
-  results.upsert_with_conflict = upsertConflict ? { ok: false, code: upsertConflict.code, error: upsertConflict.message } : { ok: true }
-
-  // cleanup
-  await supabase.from("google_tokens").delete().in("user_email", ["debug-test@climbclip.io", "debug-test2@climbclip.io"])
-
-  res.json(results)
-})
 
 app.post("/drive/upload", async (req, res) => {
   const { email, storageUrl, fileName } = req.body
@@ -233,7 +254,6 @@ app.get("/stream/:jobId", (req, res) => {
   res.setHeader("Content-Type", "text/event-stream")
   res.setHeader("Cache-Control", "no-cache")
   res.setHeader("Connection", "keep-alive")
-  res.setHeader("Access-Control-Allow-Origin", "*")
   res.flushHeaders()
   if (!sseClients[jobId]) sseClients[jobId] = []
   sseClients[jobId].push(res)
@@ -244,26 +264,26 @@ app.get("/stream/:jobId", (req, res) => {
   })
 })
 
-app.post("/upload", upload.single("file"), async (req, res) => {
+app.post("/upload", uploadLimiter, upload.single("file"), async (req, res) => {
   if (!req.file) return res.status(400).json({ error: "Aucun fichier" })
   res.json({ path: req.file.path })
 })
 
-app.post("/download", async (req, res) => {
-  const { url } = req.body
-  if (!url) return res.status(400).json({ error: "URL requise" })
+app.post("/download", genericLimiter, async (req, res) => {
+  const safeUrl = sanitizeUrl(req.body.url)
+  if (!safeUrl) return res.status(400).json({ error: "URL invalide" })
   const outputPath = path.join("/tmp", `yt_${Date.now()}.mp4`)
   try {
-    await execAsync(`yt-dlp --cookies /app/cookies.txt -f "best[ext=mp4]/best" -o "${outputPath}" "${url}"`)
+    await execAsync(`yt-dlp --cookies /app/cookies.txt -f "best[ext=mp4]/best" -o "${outputPath}" -- "${safeUrl}"`)
     res.json({ path: outputPath })
   } catch (err) { res.status(500).json({ error: err.message }) }
 })
 
-app.post("/thumbnail", async (req, res) => {
-  const { url } = req.body
-  if (!url) return res.status(400).json({ error: "URL requise" })
+app.post("/thumbnail", genericLimiter, async (req, res) => {
+  const safeUrl = sanitizeUrl(req.body.url)
+  if (!safeUrl) return res.status(400).json({ error: "URL invalide" })
   try {
-    const { stdout } = await execAsync(`yt-dlp --get-thumbnail "${url}"`)
+    const { stdout } = await execAsync(`yt-dlp --get-thumbnail -- "${safeUrl}"`)
     res.json({ thumbnail: stdout.trim() })
   } catch { res.json({ thumbnail: null }) }
 })
@@ -284,11 +304,12 @@ app.post("/share", async (req, res) => {
   } catch (err) { res.status(500).json({ error: err.message }) }
 })
 
-app.post("/preview-timestamps", async (req, res) => {
-  const { videoPaths, prompt, options } = req.body
-  if (!videoPaths?.length) return res.status(400).json({ error: "Aucune vidéo" })
+app.post("/preview-timestamps", genericLimiter, async (req, res) => {
+  const safePaths = (req.body.videoPaths || []).map(sanitizeVideoPath).filter(Boolean)
+  if (!safePaths.length) return res.status(400).json({ error: "Aucune vidéo valide" })
+  const prompt = sanitizeText(req.body.prompt, 500)
   try {
-    const mainInput = videoPaths[0]
+    const mainInput = safePaths[0]
     const { stdout: durationStr } = await execAsync(`ffprobe -v quiet -show_entries format=duration -of csv=p=0 "${mainInput}"`)
     const totalDuration = parseFloat(durationStr.trim())
     const frames = await extractKeyFrames(mainInput, 4)
@@ -305,8 +326,9 @@ app.post("/preview-timestamps", async (req, res) => {
   } catch (err) { res.status(500).json({ error: err.message }) }
 })
 
-app.post("/prompt-help", async (req, res) => {
-  const { description, refVideoFrames } = req.body
+app.post("/prompt-help", genericLimiter, async (req, res) => {
+  const description = sanitizeText(req.body.description, 500)
+  const { refVideoFrames } = req.body
   try {
     const messages = [{ role: "user", content: refVideoFrames
       ? [...refVideoFrames.map(frame => ({ type: "image", source: { type: "base64", media_type: "image/jpeg", data: frame } })), { type: "text", text: `Expert edits TikTok. Description: "${description}". Génère un prompt parfait. Uniquement le prompt.` }]
@@ -317,9 +339,9 @@ app.post("/prompt-help", async (req, res) => {
   } catch (err) { res.status(500).json({ error: err.message }) }
 })
 
-app.post("/analyze-video", async (req, res) => {
-  const { videoPath } = req.body
-  if (!videoPath) return res.status(400).json({ error: "videoPath requis" })
+app.post("/analyze-video", genericLimiter, async (req, res) => {
+  const videoPath = sanitizeVideoPath(req.body.videoPath)
+  if (!videoPath) return res.status(400).json({ error: "videoPath invalide" })
   try {
     const [frames, durationStr, probeOut] = await Promise.all([
       extractKeyFrames(videoPath, 4),
@@ -349,13 +371,40 @@ app.post("/analyze-video", async (req, res) => {
   } catch (err) { res.status(500).json({ error: err.message }) }
 })
 
-app.post("/generate", async (req, res) => {
-  const { videoUrls, videoPaths, prompt, options, musicUrl, format, zoomIntensity, speedIntensity, addIntroOutro, customTimestamps, colorGrade, transition, textOverlay, textEffect, stabilize, vocalVolume, watermark, exportQuality, exportCodec, subtitleStyle, capsulesCount, isCapsule } = req.body
-  if (!videoUrls?.length && !videoPaths?.length) return res.status(400).json({ error: "Aucune vidéo" })
+app.post("/generate", generateLimiter, async (req, res) => {
+  const safePaths = (req.body.videoPaths || []).map(sanitizeVideoPath).filter(Boolean)
+  const safeUrls  = (req.body.videoUrls  || []).map(sanitizeUrl).filter(Boolean)
+  if (!safeUrls.length && !safePaths.length) return res.status(400).json({ error: "Aucune vidéo valide" })
+
+  const sanitized = {
+    videoPaths:   safePaths,
+    videoUrls:    safeUrls,
+    prompt:       sanitizeText(req.body.prompt, 1000),
+    options:      Array.isArray(req.body.options) ? req.body.options.filter(o => typeof o === "string").map(o => o.slice(0, 50)) : [],
+    musicUrl:     sanitizeUrl(req.body.musicUrl) || null,
+    format:       sanitizeFormat(req.body.format),
+    colorGrade:   sanitizeColorGrade(req.body.colorGrade),
+    transition:   sanitizeTransition(req.body.transition),
+    textOverlay:  sanitizeText(req.body.textOverlay, 200),
+    textEffect:   typeof req.body.textEffect === "string" ? req.body.textEffect.slice(0, 20) : "default",
+    subtitleStyle: typeof req.body.subtitleStyle === "string" ? req.body.subtitleStyle.slice(0, 20) : "tiktok",
+    exportQuality: sanitizeExportQuality(req.body.exportQuality),
+    exportCodec:   sanitizeExportCodec(req.body.exportCodec),
+    zoomIntensity:  typeof req.body.zoomIntensity  === "number" ? Math.max(0, Math.min(100, req.body.zoomIntensity))  : null,
+    speedIntensity: typeof req.body.speedIntensity === "number" ? Math.max(0, Math.min(100, req.body.speedIntensity)) : null,
+    vocalVolume:    typeof req.body.vocalVolume    === "number" ? Math.max(0, Math.min(1,   req.body.vocalVolume))    : null,
+    capsulesCount:  typeof req.body.capsulesCount  === "number" ? Math.max(1, Math.min(20,  Math.round(req.body.capsulesCount))) : 4,
+    addIntroOutro:  !!req.body.addIntroOutro,
+    stabilize:      !!req.body.stabilize,
+    watermark:      !!req.body.watermark,
+    isCapsule:      !!req.body.isCapsule,
+    customTimestamps: Array.isArray(req.body.customTimestamps) ? req.body.customTimestamps.slice(0, 20) : null,
+  }
+
   const jobId = `job_${Date.now()}`
   jobs[jobId] = { status: "processing", progress: 0, clips: null, error: null }
   res.json({ jobId })
-  processVideo({ jobId, videoUrls, videoPaths, prompt, options, musicUrl, format, zoomIntensity, speedIntensity, addIntroOutro, customTimestamps, colorGrade, transition, textOverlay, textEffect, stabilize, vocalVolume, watermark, exportQuality, exportCodec, subtitleStyle, capsulesCount, isCapsule })
+  processVideo({ jobId, ...sanitized })
 })
 
 app.get("/status/:jobId", (req, res) => {
