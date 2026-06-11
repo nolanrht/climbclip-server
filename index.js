@@ -142,8 +142,8 @@ app.get("/debug/drive-config", (req, res) => {
   const rawUrl = process.env.SUPABASE_URL || ""
   res.json({
     supabase_initialized: !!supabase,
-    supabase_url_value: rawUrl,
-    supabase_url_length: rawUrl.length,
+    supabase_url_raw: rawUrl,
+    supabase_url_used: SUPABASE_URL,
     google_client_id: !!GOOGLE_CLIENT_ID,
     google_client_secret: !!GOOGLE_CLIENT_SECRET,
     redirect_uri: GOOGLE_REDIRECT_URI,
