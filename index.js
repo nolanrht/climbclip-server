@@ -138,8 +138,11 @@ app.get("/auth/google/status", async (req, res) => {
 })
 
 app.get("/debug/drive-config", (req, res) => {
+  const rawUrl = process.env.SUPABASE_URL || ""
   res.json({
     supabase_initialized: !!supabase,
+    supabase_url_value: rawUrl,
+    supabase_url_length: rawUrl.length,
     google_client_id: !!GOOGLE_CLIENT_ID,
     google_client_secret: !!GOOGLE_CLIENT_SECRET,
     redirect_uri: GOOGLE_REDIRECT_URI,
