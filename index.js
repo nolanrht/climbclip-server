@@ -639,7 +639,12 @@ async function processVideo({ jobId, videoUrls, videoPaths, prompt, options, mus
       await new Promise((resolve, reject) => { writer.on("finish", resolve); writer.on("error", reject) })
       inputPaths.push(inputPath)
     }
-    for (const p of (videoPaths||[])) { if (fs.existsSync(p)) inputPaths.push(p) }
+    for (const p of (videoPaths||[])) {
+      if (fs.existsSync(p)) inputPaths.push(p)
+      else console.warn(`processVideo: videoPaths file not found: ${p}`)
+    }
+
+    if (inputPaths.length === 0) throw new Error(`Aucun fichier vidéo accessible (videoPaths=${JSON.stringify(videoPaths)}, videoUrls=${JSON.stringify(videoUrls)})`)
 
     updateJob(jobId, { progress:15 })
 
@@ -661,7 +666,9 @@ async function processVideo({ jobId, videoUrls, videoPaths, prompt, options, mus
     if (isCapsule) {
       updateJob(jobId, { progress:30, message:"Génération des capsules... 📦" })
       const count = capsulesCount || 4
+      console.log(`Capsules: totalDuration=${totalDuration} count=${count} mainInput=${mainInput} format=${format} exportQuality=${exportQuality} exportCodec=${exportCodec}`)
       const durations = buildCapsuleTimestamps(totalDuration, count)
+      console.log(`Capsules: durations=${JSON.stringify(durations)}`)
       const targetFormat = format || "9:16"
       const { scale, crf, bitrate, codec } = getQualitySettings(exportQuality, exportCodec)
       const formatFilter = getFormatFilter(targetFormat, scale)
