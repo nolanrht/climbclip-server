@@ -73,19 +73,53 @@ app.get("/auth/google/callback", async (req, res) => {
   let email, redirectUri
   try { const parsed = JSON.parse(state || "{}"); email = parsed.email; redirectUri = parsed.redirect } catch {}
   const frontendUrl = redirectUri || FRONTEND_URL
-  if (!code) return res.redirect(`${frontendUrl}#drive_error`)
+
+  if (!code) {
+    console.error("OAuth callback: missing code")
+    return res.redirect(`${frontendUrl}#drive_error`)
+  }
+  if (!supabase) {
+    console.error("OAuth callback: Supabase not initialized — check SUPABASE_URL and SUPABASE_SERVICE_KEY env vars on Render")
+    return res.redirect(`${frontendUrl}#drive_error`)
+  }
+  if (!email) {
+    console.error("OAuth callback: no email in state param")
+    return res.redirect(`${frontendUrl}#drive_error`)
+  }
+
   try {
     const tokenRes = await axios.post("https://oauth2.googleapis.com/token", {
       code, client_id: GOOGLE_CLIENT_ID, client_secret: GOOGLE_CLIENT_SECRET,
       redirect_uri: GOOGLE_REDIRECT_URI, grant_type: "authorization_code",
     })
-    const { refresh_token } = tokenRes.data
-    if (refresh_token && email && supabase) {
-      await supabase.from("google_tokens").upsert({ user_email: email, refresh_token, updated_at: new Date().toISOString() }, { onConflict: "user_email" })
+    const { refresh_token, access_token } = tokenRes.data
+    console.log(`OAuth callback: email=${email} has_refresh_token=${!!refresh_token} has_access_token=${!!access_token}`)
+
+    if (refresh_token) {
+      const { error } = await supabase.from("google_tokens").upsert(
+        { user_email: email, refresh_token, updated_at: new Date().toISOString() },
+        { onConflict: "user_email" }
+      )
+      if (error) {
+        console.error("google_tokens upsert error:", error.message, error.details, error.hint)
+        return res.redirect(`${frontendUrl}#drive_error`)
+      }
+      console.log(`Token saved for ${email}`)
+    } else {
+      // Google doesn't re-issue refresh_token when one already exists and is still valid.
+      // Check if we already have a valid token for this user.
+      const { data: existing, error: selectErr } = await supabase
+        .from("google_tokens").select("refresh_token").eq("user_email", email).single()
+      if (selectErr || !existing?.refresh_token) {
+        console.error(`No refresh_token from Google and no existing token for ${email}. Google response:`, tokenRes.data)
+        return res.redirect(`${frontendUrl}#drive_error`)
+      }
+      console.log(`No new refresh_token from Google but existing token valid for ${email}`)
     }
+
     res.redirect(`${frontendUrl}#drive_connected`)
   } catch (err) {
-    console.error("OAuth callback error:", err.message)
+    console.error("OAuth callback error:", err.response?.data || err.message)
     res.redirect(`${frontendUrl}#drive_error`)
   }
 })
@@ -93,8 +127,24 @@ app.get("/auth/google/callback", async (req, res) => {
 app.get("/auth/google/status", async (req, res) => {
   const { email } = req.query
   if (!email || !supabase) return res.json({ connected: false })
-  const { data } = await supabase.from("google_tokens").select("user_email").eq("user_email", email).single()
-  res.json({ connected: !!data })
+  try {
+    const { data, error } = await supabase.from("google_tokens").select("refresh_token").eq("user_email", email).single()
+    if (error && error.code !== "PGRST116") console.error("Drive status check error:", error.message)
+    res.json({ connected: !!(data?.refresh_token) })
+  } catch (err) {
+    console.error("Drive status error:", err.message)
+    res.json({ connected: false })
+  }
+})
+
+app.get("/debug/drive-config", (req, res) => {
+  res.json({
+    supabase_initialized: !!supabase,
+    google_client_id: !!GOOGLE_CLIENT_ID,
+    google_client_secret: !!GOOGLE_CLIENT_SECRET,
+    redirect_uri: GOOGLE_REDIRECT_URI,
+    frontend_url: FRONTEND_URL,
+  })
 })
 
 app.post("/drive/upload", async (req, res) => {
