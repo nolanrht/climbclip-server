@@ -591,18 +591,35 @@ async function uploadToStorage(filePath, storagePath, contentType) {
 // ─── GÉNÉRATION CAPSULES (bypass duplicate detection) ──────────────────────
 
 function buildCapsuleTimestamps(totalDuration, count) {
+  const MIN_GAP = 2      // min seconds between consecutive start times
+  const MIN_DUR = 3      // min clip duration in seconds
+  // Each capsule occupies an equal slot of the total video
+  const slotSize = totalDuration / count
+  // Clip duration: 75% of the slot, clamped between 5s and 60s
+  const clipDuration = Math.min(60, Math.max(5, slotSize * 0.75))
+
   const capsules = []
   for (let i = 0; i < count; i++) {
-    // Décalage aléatoire entre 0.3s et 2s pour chaque capsule
-    const offset = 0.3 + (Math.random() * 1.7) + (i * 0.5)
-    const start = Math.min(offset, totalDuration * 0.05)
-    // Durée = quasi-totalité de la vidéo moins le début décalé
-    const duration = Math.max(totalDuration - start - 0.1, totalDuration * 0.85)
-    if (start + duration <= totalDuration) {
-      capsules.push({ start: parseFloat(start.toFixed(2)), duration: parseFloat(duration.toFixed(2)), name: `Capsule #${i+1}` })
+    // Start 15% into each slot so capsules are truly from different parts of the video
+    const start = parseFloat((i * slotSize + slotSize * 0.15).toFixed(2))
+    const available = totalDuration - start - 0.1
+    const duration = parseFloat(Math.min(clipDuration, Math.max(MIN_DUR, available)).toFixed(2))
+    if (start < totalDuration - MIN_DUR) {
+      capsules.push({ start, duration, name: `Capsule #${i+1}` })
     }
   }
-  return capsules
+
+  // Enforce minimum gap between consecutive start times
+  for (let i = 1; i < capsules.length; i++) {
+    const minStart = parseFloat((capsules[i-1].start + MIN_GAP).toFixed(2))
+    if (capsules[i].start < minStart) {
+      capsules[i].start = minStart
+      const available = totalDuration - minStart - 0.1
+      capsules[i].duration = parseFloat(Math.min(clipDuration, Math.max(MIN_DUR, available)).toFixed(2))
+    }
+  }
+
+  return capsules.filter(c => c.duration >= MIN_DUR && c.start + c.duration <= totalDuration + 0.5)
 }
 
 // ─── MAIN PROCESS ──────────────────────────────────────────────────────────
