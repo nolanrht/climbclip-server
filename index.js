@@ -651,50 +651,64 @@ async function processVideo({ jobId, videoUrls, videoPaths, prompt, options, mus
     if (isCapsule) {
       updateJob(jobId, { progress:30, message:"Génération des capsules... 📦" })
       const count = capsulesCount || 4
-      console.log(`Capsules: totalDuration=${totalDuration} count=${count} mainInput=${mainInput} format=${format} exportQuality=${exportQuality} exportCodec=${exportCodec}`)
       const durations = buildCapsuleTimestamps(totalDuration, count)
-      console.log(`Capsules: durations=${JSON.stringify(durations)}`)
       const targetFormat = format || "9:16"
-      const { scale, crf, bitrate, codec } = getQualitySettings(exportQuality, exportCodec)
-      const formatFilter = getFormatFilter(targetFormat, scale)
+      // Force 720p for capsules — keeps ffmpeg buffers and output files small on 512MB Render
+      const capsuleScale = "1280:720"
+      const capsuleBitrate = 2000
+      const formatFilter = getFormatFilter(targetFormat, capsuleScale)
+
       for (let ci = 0; ci < durations.length; ci++) {
         const clip = durations[ci]
-        const outputPath = path.join(tmpDir, `clip_${ci}_${Date.now()}.mp4`)
+        const outputPath = path.join(tmpDir, `capsule_${ci}_${Date.now()}.mp4`)
 
         await new Promise((resolve, reject) => {
-          const outputOpts = [
-            "-movflags faststart", `-c:v ${codec}`, "-preset fast", `-crf ${crf}`,
-            `-vf ${formatFilter}`,
-            "-map_metadata -1",
-            `-b:v ${Math.floor(bitrate+Math.random()*500)}k`,
-            `-maxrate ${Math.floor(bitrate*1.4+Math.random()*500)}k`,
-            `-bufsize ${bitrate*2}k`,
-            "-c:a aac", "-b:a 192k",
-          ]
-          ffmpeg(mainInput).setStartTime(clip.start).setDuration(clip.duration)
-            .outputOptions(outputOpts).output(outputPath)
+          ffmpeg(mainInput)
+            .setStartTime(clip.start)
+            .setDuration(clip.duration)
+            .outputOptions([
+              "-movflags faststart",
+              "-c:v libx264",
+              "-preset ultrafast",
+              "-crf 28",
+              `-vf ${formatFilter}`,
+              "-map_metadata -1",
+              `-b:v ${capsuleBitrate}k`,
+              `-maxrate ${Math.floor(capsuleBitrate * 1.3)}k`,
+              `-bufsize ${capsuleBitrate}k`,
+              "-threads 2",
+              "-c:a aac", "-b:a 128k",
+            ])
+            .output(outputPath)
             .on("end", resolve)
             .on("error", (err, stdout, stderr) => { console.error("FFmpeg capsule:", stderr?.slice(-300)); reject(err) })
             .run()
         })
 
-        const thumbPath = path.join(tmpDir, `thumb_${ci}_${Date.now()}.jpg`)
-        try { await execAsync(`ffmpeg -i "${outputPath}" -ss 0.5 -vframes 1 -q:v 2 "${thumbPath}" -y 2>/dev/null`) } catch {}
-
-        const uniqueId = `${Date.now()}_${ci}_${Math.random().toString(36).slice(2)}`
+        // Upload to storage — no base64 fallback to avoid loading whole video into RAM
+        const uniqueId = `${Date.now()}_${ci}`
         const storageUrl = await uploadToStorage(outputPath, `clips/${uniqueId}.mp4`, "video/mp4")
-        const thumbStorageUrl = await uploadToStorage(thumbPath, `thumbs/${uniqueId}.jpg`, "image/jpeg")
+        if (fs.existsSync(outputPath)) fs.unlinkSync(outputPath)
 
-        let base64 = null
-        if (!storageUrl) base64 = `data:video/mp4;base64,${fs.readFileSync(outputPath).toString("base64")}`
-        let thumbBase64 = null
-        if (!thumbStorageUrl && fs.existsSync(thumbPath)) thumbBase64 = `data:image/jpeg;base64,${fs.readFileSync(thumbPath).toString("base64")}`
-
+        // Thumbnail — small, safe to base64 as fallback
+        let thumbnail = null
+        const thumbPath = path.join(tmpDir, `thumb_${ci}_${Date.now()}.jpg`)
+        try {
+          await execAsync(`ffmpeg -ss ${clip.start + 0.5} -i "${mainInput}" -vframes 1 -q:v 5 -vf "scale=320:-2" "${thumbPath}" -y 2>/dev/null`)
+          const thumbStorageUrl = await uploadToStorage(thumbPath, `thumbs/${uniqueId}.jpg`, "image/jpeg")
+          if (thumbStorageUrl) {
+            thumbnail = thumbStorageUrl
+          } else if (fs.existsSync(thumbPath)) {
+            thumbnail = `data:image/jpeg;base64,${fs.readFileSync(thumbPath).toString("base64")}`
+          }
+        } catch {}
         if (fs.existsSync(thumbPath)) fs.unlinkSync(thumbPath)
-        fs.unlinkSync(outputPath)
 
-        clips.push({ name: clip.name, base64, storageUrl, thumbnail: thumbStorageUrl || thumbBase64, duration: clip.duration })
-        updateJob(jobId, { progress: 30 + Math.floor((ci+1) / durations.length * 70) })
+        clips.push({ name: clip.name, storageUrl, base64: null, thumbnail, duration: clip.duration })
+        updateJob(jobId, { progress: 30 + Math.floor((ci + 1) / durations.length * 70) })
+
+        // Explicit GC hint between clips
+        if (global.gc) global.gc()
       }
 
       for (const p of inputPaths) { if (fs.existsSync(p)) try { fs.unlinkSync(p) } catch {} }
