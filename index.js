@@ -147,6 +147,18 @@ app.get("/debug/drive-config", (req, res) => {
   })
 })
 
+app.get("/debug/test-upsert", async (req, res) => {
+  if (!supabase) return res.json({ ok: false, error: "supabase not initialized" })
+  const { error } = await supabase.from("google_tokens").upsert(
+    { user_email: "debug-test@climbclip.io", refresh_token: "debug_test_token", updated_at: new Date().toISOString() },
+    { onConflict: "user_email" }
+  )
+  if (error) return res.json({ ok: false, error: error.message, code: error.code, hint: error.hint, details: error.details })
+  // cleanup
+  await supabase.from("google_tokens").delete().eq("user_email", "debug-test@climbclip.io")
+  res.json({ ok: true })
+})
+
 app.post("/drive/upload", async (req, res) => {
   const { email, storageUrl, fileName } = req.body
   if (!email || !storageUrl) return res.status(400).json({ error: "email et storageUrl requis" })
