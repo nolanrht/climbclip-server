@@ -760,7 +760,7 @@ async function processVideo({ jobId, videoUrls, videoPaths, prompt, options, mus
 
     updateJob(jobId, { progress:32, message:"Analyse audio et mouvement... 🎵" })
     const [beatData, sceneCuts, motionSegments, effects] = await Promise.all([
-      options?.includes("Beat sync") && musicPath ? detectBeats(musicPath) : Promise.resolve(null),
+      options?.includes("Beat sync") ? detectBeats(musicPath || mainInput) : Promise.resolve(null),
       detectSceneCuts(mainInput),
       scoreSegmentsByMotion(mainInput, totalDuration),
       analyzeEffects(prompt, totalDuration, options, zoomIntensity, speedIntensity),
@@ -860,32 +860,35 @@ Règles timestamps: start+duration<=${Math.round(totalDuration)}, durées 10-30s
       if (addIntroOutro) vfFilters.push(buildIntroOutroFilter(clip.duration, targetFormat))
 
       const vfString = vfFilters.join(",")
-      const audioFilters = []
 
+      // Build atempo chain for speed-ramped audio
+      let atempoChain = ""
       if (atempoVal !== "1.0") {
         const speed = parseFloat(atempoVal)
-        if (speed >= 0.5 && speed <= 2.0) audioFilters.push(`atempo=${speed}`)
-        else if (speed > 2.0) { audioFilters.push("atempo=2.0"); audioFilters.push(`atempo=${(speed/2.0).toFixed(2)}`) }
-        else if (speed < 0.5) { audioFilters.push("atempo=0.5"); audioFilters.push(`atempo=${(speed/0.5).toFixed(2)}`) }
+        if (speed >= 0.5 && speed <= 2.0) atempoChain = `,atempo=${speed}`
+        else if (speed > 2.0) atempoChain = `,atempo=2.0,atempo=${(speed/2.0).toFixed(2)}`
+        else if (speed < 0.5) atempoChain = `,atempo=0.5,atempo=${(speed/0.5).toFixed(2)}`
       }
       const vocalVol = vocalVolume !== undefined ? vocalVolume : 0.3
-      if (musicPath && vocalVol > 0) audioFilters.push(`volume=${vocalVol}`)
 
       await new Promise((resolve, reject) => {
         let cmd = ffmpeg(mainInput).setStartTime(clip.start).setDuration(clip.duration)
-        const outputOpts = [
-          "-movflags faststart", `-c:v ${codec}`, "-preset fast", `-crf ${crf}`, `-vf ${vfString}`,
+        const baseOpts = [
+          "-movflags faststart", `-c:v ${codec}`, "-preset fast", `-crf ${crf}`,
           "-map_metadata -1",
           `-b:v ${Math.floor(bitrate+Math.random()*500)}k`,
           `-maxrate ${Math.floor(bitrate*1.4+Math.random()*500)}k`,
           `-bufsize ${bitrate*2}k`,
         ]
+        let outputOpts
         if (musicPath && fs.existsSync(musicPath)) {
+          // Mix voice (from video) + music with amix — vocalVol controls voice level
           cmd = cmd.input(musicPath)
-          outputOpts.push("-c:a aac","-b:a 192k","-map 0:v:0","-map 1:a:0","-shortest")
-          if (audioFilters.length > 0) outputOpts.push(`-af ${audioFilters.join(",")}`)
+          const fc = `[0:v]${vfString}[vout];[0:a]volume=${vocalVol}${atempoChain}[va];[1:a]volume=0.85[ma];[va][ma]amix=inputs=2:duration=first[aout]`
+          outputOpts = [...baseOpts, "-c:a aac", "-b:a 192k", `-filter_complex ${fc}`, "-map [vout]", "-map [aout]", "-shortest"]
         } else {
-          outputOpts.push("-c:a aac","-b:a 192k")
+          const audioFilters = atempoChain ? [atempoChain.slice(1)] : []
+          outputOpts = [...baseOpts, `-vf ${vfString}`, "-c:a aac", "-b:a 192k"]
           if (audioFilters.length > 0) outputOpts.push(`-af ${audioFilters.join(",")}`)
         }
         cmd.outputOptions(outputOpts).output(outputPath)
