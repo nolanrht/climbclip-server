@@ -670,9 +670,7 @@ async function processVideo({ jobId, videoUrls, videoPaths, prompt, options, mus
       const count = capsulesCount || 4
       const durations = buildCapsuleTimestamps(totalDuration, count)
       const targetFormat = format || "9:16"
-      // Force 720p for capsules — keeps ffmpeg buffers and output files small on 512MB Render
       const capsuleScale = "1280:720"
-      const capsuleBitrate = 2000
       const formatFilter = getFormatFilter(targetFormat, capsuleScale)
 
       for (let ci = 0; ci < durations.length; ci++) {
@@ -686,13 +684,10 @@ async function processVideo({ jobId, videoUrls, videoPaths, prompt, options, mus
             .outputOptions([
               "-movflags faststart",
               "-c:v libx264",
-              "-preset ultrafast",
-              "-crf 28",
+              "-preset slow",
+              "-crf 18",
               `-vf ${formatFilter}`,
               "-map_metadata -1",
-              `-b:v ${capsuleBitrate}k`,
-              `-maxrate ${Math.floor(capsuleBitrate * 1.3)}k`,
-              `-bufsize ${capsuleBitrate}k`,
               "-threads 2",
               "-c:a aac", "-b:a 128k",
             ])
