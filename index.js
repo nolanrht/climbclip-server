@@ -149,14 +149,38 @@ app.get("/debug/drive-config", (req, res) => {
 
 app.get("/debug/test-upsert", async (req, res) => {
   if (!supabase) return res.json({ ok: false, error: "supabase not initialized" })
-  const { error } = await supabase.from("google_tokens").upsert(
+
+  // Decode service key JWT to check which project it belongs to
+  const serviceKey = process.env.SUPABASE_SERVICE_KEY || ""
+  let keyRef = null
+  try {
+    const payload = JSON.parse(Buffer.from(serviceKey.split(".")[1], "base64").toString())
+    keyRef = payload.ref || payload.iss || null
+  } catch {}
+
+  const urlRef = (process.env.SUPABASE_URL || "").match(/https:\/\/([^.]+)\.supabase\.co/)?.[1] || null
+
+  // Try upsert with updated_at
+  const { error: e1 } = await supabase.from("google_tokens").upsert(
     { user_email: "debug-test@climbclip.io", refresh_token: "debug_test_token", updated_at: new Date().toISOString() },
     { onConflict: "user_email" }
   )
-  if (error) return res.json({ ok: false, error: error.message, code: error.code, hint: error.hint, details: error.details })
-  // cleanup
-  await supabase.from("google_tokens").delete().eq("user_email", "debug-test@climbclip.io")
-  res.json({ ok: true })
+  if (!e1) {
+    await supabase.from("google_tokens").delete().eq("user_email", "debug-test@climbclip.io")
+    return res.json({ ok: true, url_ref: urlRef, key_ref: keyRef })
+  }
+
+  // Retry without updated_at (in case column missing)
+  const { error: e2 } = await supabase.from("google_tokens").upsert(
+    { user_email: "debug-test@climbclip.io", refresh_token: "debug_test_token" },
+    { onConflict: "user_email" }
+  )
+  if (!e2) {
+    await supabase.from("google_tokens").delete().eq("user_email", "debug-test@climbclip.io")
+    return res.json({ ok: true, note: "works without updated_at — column missing", url_ref: urlRef, key_ref: keyRef })
+  }
+
+  res.json({ ok: false, error: e1.message, code: e1.code, url_ref: urlRef, key_ref: keyRef })
 })
 
 app.post("/drive/upload", async (req, res) => {
