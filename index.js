@@ -485,21 +485,6 @@ function getColorGradeFilter(grade) {
   return grades[grade] || null
 }
 
-function getNativeMetadata() {
-  const devices = [
-    { make:"Apple",   model:"iPhone 15 Pro",   software:"17.0" },
-    { make:"Apple",   model:"iPhone 14",        software:"16.6" },
-    { make:"Samsung", model:"Galaxy S23",       software:"13" },
-    { make:"Samsung", model:"Galaxy S22 Ultra", software:"12" },
-    { make:"Google",  model:"Pixel 8 Pro",      software:"14" },
-  ]
-  const device = devices[Math.floor(Math.random() * devices.length)]
-  const now = new Date()
-  now.setDate(now.getDate() - Math.floor(Math.random() * 30))
-  now.setHours(Math.floor(Math.random() * 14) + 8)
-  now.setMinutes(Math.floor(Math.random() * 60))
-  return { ...device, date: now.toISOString().replace(/\.\d{3}Z$/, "").replace("T", " ") }
-}
 
 async function detectSceneCuts(inputPath) {
   try {
@@ -672,8 +657,6 @@ async function processVideo({ jobId, videoUrls, videoPaths, prompt, options, mus
       const targetFormat = format || "9:16"
       const { scale, crf, bitrate, codec } = getQualitySettings(exportQuality, exportCodec)
       const formatFilter = getFormatFilter(targetFormat, scale)
-      const metadata = getNativeMetadata()
-
       for (let ci = 0; ci < durations.length; ci++) {
         const clip = durations[ci]
         const outputPath = path.join(tmpDir, `clip_${ci}_${Date.now()}.mp4`)
@@ -683,8 +666,6 @@ async function processVideo({ jobId, videoUrls, videoPaths, prompt, options, mus
             "-movflags faststart", `-c:v ${codec}`, "-preset fast", `-crf ${crf}`,
             `-vf ${formatFilter}`,
             "-map_metadata -1",
-            `-metadata make="${metadata.make}"`, `-metadata model="${metadata.model}"`,
-            `-metadata software="${metadata.software}"`, `-metadata creation_time="${metadata.date}"`,
             `-b:v ${Math.floor(bitrate+Math.random()*500)}k`,
             `-maxrate ${Math.floor(bitrate*1.4+Math.random()*500)}k`,
             `-bufsize ${bitrate*2}k`,
@@ -813,8 +794,6 @@ Règles timestamps: start+duration<=${Math.round(totalDuration)}, durées 10-30s
     const targetFormat = format || "9:16"
     const { scale, crf, bitrate, codec } = getQualitySettings(exportQuality, exportCodec)
     const formatFilter = getFormatFilter(targetFormat, scale, subjectPos?.x_pct, subjectPos?.y_pct)
-    const metadata = getNativeMetadata()
-
     for (let ci = 0; ci < durations.length; ci++) {
       const clip = durations[ci]
       const outputPath = path.join(tmpDir, `clip_${ci}_${Date.now()}.mp4`)
@@ -871,9 +850,6 @@ Règles timestamps: start+duration<=${Math.round(totalDuration)}, durées 10-30s
         const outputOpts = [
           "-movflags faststart", `-c:v ${codec}`, "-preset fast", `-crf ${crf}`, `-vf ${vfString}`,
           "-map_metadata -1",
-          `-metadata make="${metadata.make}"`, `-metadata model="${metadata.model}"`,
-          `-metadata software="${metadata.software}"`, `-metadata creation_time="${metadata.date}"`,
-          `-metadata com.apple.quicktime.make="${metadata.make}"`, `-metadata com.apple.quicktime.model="${metadata.model}"`,
           `-b:v ${Math.floor(bitrate+Math.random()*500)}k`,
           `-maxrate ${Math.floor(bitrate*1.4+Math.random()*500)}k`,
           `-bufsize ${bitrate*2}k`,
