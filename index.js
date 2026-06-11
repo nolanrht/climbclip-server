@@ -150,37 +150,31 @@ app.get("/debug/drive-config", (req, res) => {
 app.get("/debug/test-upsert", async (req, res) => {
   if (!supabase) return res.json({ ok: false, error: "supabase not initialized" })
 
-  // Decode service key JWT to check which project it belongs to
-  const serviceKey = process.env.SUPABASE_SERVICE_KEY || ""
-  let keyRef = null
-  try {
-    const payload = JSON.parse(Buffer.from(serviceKey.split(".")[1], "base64").toString())
-    keyRef = payload.ref || payload.iss || null
-  } catch {}
+  const results = {}
 
-  const urlRef = (process.env.SUPABASE_URL || "").match(/https:\/\/([^.]+)\.supabase\.co/)?.[1] || null
+  // 1. Simple SELECT
+  const { data: selectData, error: selectErr } = await supabase.from("google_tokens").select("*").limit(1)
+  results.select = selectErr ? { ok: false, code: selectErr.code, error: selectErr.message } : { ok: true, rows: selectData?.length }
 
-  // Try upsert with updated_at
-  const { error: e1 } = await supabase.from("google_tokens").upsert(
-    { user_email: "debug-test@climbclip.io", refresh_token: "debug_test_token", updated_at: new Date().toISOString() },
-    { onConflict: "user_email" }
-  )
-  if (!e1) {
-    await supabase.from("google_tokens").delete().eq("user_email", "debug-test@climbclip.io")
-    return res.json({ ok: true, url_ref: urlRef, key_ref: keyRef })
-  }
+  // 2. Simple INSERT (no conflict handling)
+  const { error: insertErr } = await supabase.from("google_tokens")
+    .insert({ user_email: "debug-test@climbclip.io", refresh_token: "debug_token" })
+  results.insert = insertErr ? { ok: false, code: insertErr.code, error: insertErr.message } : { ok: true }
 
-  // Retry without updated_at (in case column missing)
-  const { error: e2 } = await supabase.from("google_tokens").upsert(
-    { user_email: "debug-test@climbclip.io", refresh_token: "debug_test_token" },
-    { onConflict: "user_email" }
-  )
-  if (!e2) {
-    await supabase.from("google_tokens").delete().eq("user_email", "debug-test@climbclip.io")
-    return res.json({ ok: true, note: "works without updated_at — column missing", url_ref: urlRef, key_ref: keyRef })
-  }
+  // 3. Upsert without onConflict
+  const { error: upsertNoConflict } = await supabase.from("google_tokens")
+    .upsert({ user_email: "debug-test2@climbclip.io", refresh_token: "debug_token" })
+  results.upsert_no_conflict = upsertNoConflict ? { ok: false, code: upsertNoConflict.code, error: upsertNoConflict.message } : { ok: true }
 
-  res.json({ ok: false, error: e1.message, code: e1.code, url_ref: urlRef, key_ref: keyRef })
+  // 4. Upsert with onConflict
+  const { error: upsertConflict } = await supabase.from("google_tokens")
+    .upsert({ user_email: "debug-test@climbclip.io", refresh_token: "debug_token_2" }, { onConflict: "user_email" })
+  results.upsert_with_conflict = upsertConflict ? { ok: false, code: upsertConflict.code, error: upsertConflict.message } : { ok: true }
+
+  // cleanup
+  await supabase.from("google_tokens").delete().in("user_email", ["debug-test@climbclip.io", "debug-test2@climbclip.io"])
+
+  res.json(results)
 })
 
 app.post("/drive/upload", async (req, res) => {
