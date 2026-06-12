@@ -93,8 +93,7 @@ const supabase = SUPABASE_URL && process.env.SUPABASE_SERVICE_KEY
 
 const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID
 const GOOGLE_CLIENT_SECRET = process.env.GOOGLE_CLIENT_SECRET
-const REPLICATE_API_TOKEN = process.env.REPLICATE_API_TOKEN
-if (!REPLICATE_API_TOKEN) console.warn("⚠  REPLICATE_API_TOKEN manquant — l'upscaling d'images sera désactivé. Ajoute-le dans les variables d'environnement Render.")
+const sharp = require("sharp")
 const GOOGLE_REDIRECT_URI = "https://climbclip-server.onrender.com/auth/google/callback"
 const FRONTEND_URL = process.env.FRONTEND_URL || "https://climbclip.vercel.app"
 
@@ -296,89 +295,58 @@ app.post("/upscale", uploadLimiter, upload.single("file"), async (req, res) => {
 
   try {
     if (isImage) {
-      if (!REPLICATE_API_TOKEN) {
-        fs.unlinkSync(filePath)
-        return res.status(503).json({ error: "REPLICATE_API_TOKEN manquant sur le serveur" })
-      }
-
-      const imageBuffer = fs.readFileSync(filePath)
+      // Sharp : lanczos3 resize + unsharp mask pour simuler super-résolution
+      const inputBuf = fs.readFileSync(filePath)
       fs.unlinkSync(filePath)
-      const base64Image = `data:${mimetype};base64,${imageBuffer.toString("base64")}`
-      console.log(`[upscale] base64 size=${(base64Image.length/1024).toFixed(0)}KB, calling Replicate...`)
 
-      let prediction
-      try {
-        const createRes = await axios.post(
-          "https://api.replicate.com/v1/models/nightmareai/real-esrgan/predictions",
-          { input: { image: base64Image, scale, face_enhance: false } },
-          { headers: { Authorization: `Bearer ${REPLICATE_API_TOKEN}`, "Content-Type": "application/json", Prefer: "wait=60" }, timeout: 75_000 }
-        )
-        prediction = createRes.data
-        console.log(`[upscale] Replicate created id=${prediction.id} status=${prediction.status}`)
-      } catch (axErr) {
-        const status = axErr.response?.status
-        const body = axErr.response?.data
-        console.error(`[upscale] Replicate create failed: HTTP ${status}`, JSON.stringify(body))
-        return res.status(502).json({ error: `Replicate API ${status}: ${body?.detail || body?.title || axErr.message}` })
+      const meta = await sharp(inputBuf).metadata()
+      const newW = (meta.width  || 512) * scale
+      const newH = (meta.height || 512) * scale
+      console.log(`[upscale] image ${meta.width}x${meta.height} → ${newW}x${newH}`)
+
+      const outputBuf = await sharp(inputBuf)
+        .resize(newW, newH, { kernel: sharp.kernel.lanczos3, fit: "fill" })
+        // unsharp mask : sigma, strength, threshold
+        .sharpen({ sigma: 1.2, m1: 1.5, m2: 0.7, x1: 2, y2: 10, y3: 20 })
+        .toBuffer()
+
+      const ext = (mimetype.split("/")[1] || "jpg").replace("jpeg", "jpg")
+      const outputMime = ext === "png" ? "image/png" : ext === "webp" ? "image/webp" : "image/jpeg"
+      const storageKey = `upscaled/${Date.now()}_${Math.random().toString(36).slice(2)}.${ext}`
+
+      const { error: upErr } = await supabase.storage.from("clips").upload(storageKey, outputBuf, { contentType: outputMime, upsert: false })
+      if (upErr) {
+        console.error("[upscale] Supabase upload error:", upErr)
+        return res.status(500).json({ error: "Échec de la sauvegarde image" })
       }
-
-      const deadline = Date.now() + 120_000
-      while (["starting", "processing"].includes(prediction.status)) {
-        if (Date.now() > deadline) return res.status(504).json({ error: "Upscaling trop long — essaie avec une image plus petite" })
-        await new Promise(r => setTimeout(r, 2000))
-        try {
-          const poll = await axios.get(
-            `https://api.replicate.com/v1/predictions/${prediction.id}`,
-            { headers: { Authorization: `Bearer ${REPLICATE_API_TOKEN}` }, timeout: 10_000 }
-          )
-          prediction = poll.data
-          console.log(`[upscale] poll id=${prediction.id} status=${prediction.status}`)
-        } catch (pollErr) {
-          console.error("[upscale] poll error:", pollErr.message)
-        }
-      }
-
-      console.log(`[upscale] final status=${prediction.status} output=${JSON.stringify(prediction.output)?.slice(0,100)}`)
-
-      if (prediction.status !== "succeeded" || !prediction.output) {
-        return res.status(500).json({ error: "Upscaling échoué : " + (prediction.error || prediction.status || "erreur inconnue") })
-      }
-
-      const outputUrl = Array.isArray(prediction.output) ? prediction.output[0] : prediction.output
-      try {
-        const imgRes = await axios.get(outputUrl, { responseType: "arraybuffer", timeout: 30_000 })
-        const ext = mimetype.split("/")[1]?.replace("jpeg","jpg") || "jpg"
-        const storageKey = `upscaled/${Date.now()}_${Math.random().toString(36).slice(2)}.${ext}`
-        const { error: upErr } = await supabase.storage.from("clips").upload(storageKey, Buffer.from(imgRes.data), { contentType: mimetype, upsert: false })
-        if (!upErr) {
-          const { data: urlData } = supabase.storage.from("clips").getPublicUrl(storageKey)
-          console.log("[upscale] uploaded to Supabase:", urlData.publicUrl)
-          return res.json({ url: urlData.publicUrl, type: "image" })
-        }
-        console.warn("[upscale] Supabase upload error:", upErr)
-      } catch (dlErr) {
-        console.error("[upscale] download/upload error:", dlErr.message)
-      }
-      res.json({ url: outputUrl, type: "image" })
+      const { data: urlData } = supabase.storage.from("clips").getPublicUrl(storageKey)
+      console.log("[upscale] image done:", urlData.publicUrl)
+      return res.json({ url: urlData.publicUrl, type: "image" })
 
     } else {
-      // Video: scale=2 → 1080p, scale=4 → 4K
+      // FFmpeg : scale lanczos vers résolution cible + unsharp pour renforcer les détails
       const targetHeight = scale === 4 ? 2160 : 1080
       const outputPath = `/tmp/upscaled_${Date.now()}.mp4`
-      console.log(`[upscale] video → target ${targetHeight}p with lanczos`)
+      console.log(`[upscale] video → ${targetHeight}p lanczos + unsharp`)
+
       await new Promise((resolve, reject) => {
         ffmpeg(filePath)
           .outputOptions([
-            `-vf scale=-2:${targetHeight}:flags=lanczos`,
+            // scale avec lanczos, puis unsharp mask (luma 5x5 sigma 1.0 gain 0.8)
+            `-vf scale=-2:${targetHeight}:flags=lanczos,unsharp=5:5:1.0:5:5:0.0`,
             "-c:v libx264", "-preset fast", "-crf 18",
             "-c:a copy", "-movflags faststart",
           ])
           .output(outputPath)
           .on("end", resolve)
-          .on("error", (err, _stdout, stderr) => { console.error("[upscale] ffmpeg:", stderr?.slice(-400)); reject(err) })
+          .on("error", (err, _stdout, stderr) => {
+            console.error("[upscale] ffmpeg error:", stderr?.slice(-500))
+            reject(err)
+          })
           .run()
       })
       fs.unlinkSync(filePath)
+
       const storageKey = `upscaled/${Date.now()}_${Math.random().toString(36).slice(2)}.mp4`
       const storageUrl = await uploadToStorage(outputPath, storageKey, "video/mp4")
       if (fs.existsSync(outputPath)) fs.unlinkSync(outputPath)
