@@ -93,6 +93,7 @@ const supabase = SUPABASE_URL && process.env.SUPABASE_SERVICE_KEY
 
 const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID
 const GOOGLE_CLIENT_SECRET = process.env.GOOGLE_CLIENT_SECRET
+const REPLICATE_API_TOKEN = process.env.REPLICATE_API_TOKEN
 const GOOGLE_REDIRECT_URI = "https://climbclip-server.onrender.com/auth/google/callback"
 const FRONTEND_URL = process.env.FRONTEND_URL || "https://climbclip.vercel.app"
 
@@ -267,6 +268,96 @@ app.get("/stream/:jobId", (req, res) => {
 app.post("/upload", uploadLimiter, upload.single("file"), async (req, res) => {
   if (!req.file) return res.status(400).json({ error: "Aucun fichier" })
   res.json({ path: req.file.path })
+})
+
+app.post("/upscale", uploadLimiter, upload.single("file"), async (req, res) => {
+  if (!req.file) return res.status(400).json({ error: "Fichier requis" })
+  const scale = parseInt(req.body.scale) === 4 ? 4 : 2
+  const { mimetype, path: filePath, size } = req.file
+  const isImage = mimetype.startsWith("image/")
+  const isVideo = mimetype.startsWith("video/")
+
+  if (!isImage && !isVideo) {
+    if (fs.existsSync(filePath)) fs.unlinkSync(filePath)
+    return res.status(400).json({ error: "Format non supporté (JPG, PNG, WebP, MP4, MOV)" })
+  }
+  if (isImage && size > 20 * 1024 * 1024) {
+    fs.unlinkSync(filePath)
+    return res.status(400).json({ error: "Image trop lourde (max 20MB)" })
+  }
+  if (isVideo && size > 200 * 1024 * 1024) {
+    fs.unlinkSync(filePath)
+    return res.status(400).json({ error: "Vidéo trop lourde (max 200MB)" })
+  }
+
+  try {
+    if (isImage) {
+      if (!REPLICATE_API_TOKEN) {
+        fs.unlinkSync(filePath)
+        return res.status(503).json({ error: "Replicate API non configurée" })
+      }
+      const imageBuffer = fs.readFileSync(filePath)
+      fs.unlinkSync(filePath)
+      const base64Image = `data:${mimetype};base64,${imageBuffer.toString("base64")}`
+
+      const createRes = await axios.post(
+        "https://api.replicate.com/v1/models/nightmareai/real-esrgan/predictions",
+        { input: { image: base64Image, scale, face_enhance: false } },
+        { headers: { Authorization: `Bearer ${REPLICATE_API_TOKEN}`, "Content-Type": "application/json", Prefer: "wait=60" } }
+      )
+      let prediction = createRes.data
+      const deadline = Date.now() + 120_000
+      while (prediction.status !== "succeeded" && prediction.status !== "failed" && prediction.status !== "canceled") {
+        if (Date.now() > deadline) return res.status(504).json({ error: "Upscaling trop long — essaie avec une image plus petite" })
+        await new Promise(r => setTimeout(r, 1500))
+        const poll = await axios.get(
+          `https://api.replicate.com/v1/predictions/${prediction.id}`,
+          { headers: { Authorization: `Bearer ${REPLICATE_API_TOKEN}` } }
+        )
+        prediction = poll.data
+      }
+      if (prediction.status !== "succeeded" || !prediction.output) {
+        return res.status(500).json({ error: "Upscaling échoué — " + (prediction.error || "erreur inconnue") })
+      }
+      const outputUrl = prediction.output
+      try {
+        const imgRes = await axios.get(outputUrl, { responseType: "arraybuffer", timeout: 30_000 })
+        const ext = mimetype.split("/")[1]?.replace("jpeg","jpg") || "jpg"
+        const storageKey = `upscaled/${Date.now()}_${Math.random().toString(36).slice(2)}.${ext}`
+        const { error: upErr } = await supabase.storage.from("clips").upload(storageKey, Buffer.from(imgRes.data), { contentType: mimetype, upsert: false })
+        if (!upErr) {
+          const { data: urlData } = supabase.storage.from("clips").getPublicUrl(storageKey)
+          return res.json({ url: urlData.publicUrl, type: "image" })
+        }
+      } catch {}
+      res.json({ url: outputUrl, type: "image" })
+
+    } else {
+      const outputPath = `/tmp/upscaled_${Date.now()}.mp4`
+      await new Promise((resolve, reject) => {
+        ffmpeg(filePath)
+          .outputOptions([
+            `-vf scale=iw*${scale}:ih*${scale}:flags=lanczos`,
+            "-c:v libx264", "-preset fast", "-crf 18",
+            "-c:a copy", "-movflags faststart",
+          ])
+          .output(outputPath)
+          .on("end", resolve)
+          .on("error", (err, _stdout, stderr) => { console.error("FFmpeg upscale:", stderr?.slice(-300)); reject(err) })
+          .run()
+      })
+      fs.unlinkSync(filePath)
+      const storageKey = `upscaled/${Date.now()}_${Math.random().toString(36).slice(2)}.mp4`
+      const storageUrl = await uploadToStorage(outputPath, storageKey, "video/mp4")
+      if (fs.existsSync(outputPath)) fs.unlinkSync(outputPath)
+      if (!storageUrl) return res.status(500).json({ error: "Échec de la sauvegarde" })
+      res.json({ url: storageUrl, type: "video" })
+    }
+  } catch (err) {
+    console.error("Upscale error:", err.message)
+    if (fs.existsSync(filePath)) try { fs.unlinkSync(filePath) } catch {}
+    res.status(500).json({ error: "Erreur lors de l'upscaling" })
+  }
 })
 
 app.post("/download", genericLimiter, async (req, res) => {
