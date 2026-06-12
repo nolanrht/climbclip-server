@@ -94,6 +94,7 @@ const supabase = SUPABASE_URL && process.env.SUPABASE_SERVICE_KEY
 const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID
 const GOOGLE_CLIENT_SECRET = process.env.GOOGLE_CLIENT_SECRET
 const REPLICATE_API_TOKEN = process.env.REPLICATE_API_TOKEN
+if (!REPLICATE_API_TOKEN) console.warn("⚠  REPLICATE_API_TOKEN manquant — l'upscaling d'images sera désactivé. Ajoute-le dans les variables d'environnement Render.")
 const GOOGLE_REDIRECT_URI = "https://climbclip-server.onrender.com/auth/google/callback"
 const FRONTEND_URL = process.env.FRONTEND_URL || "https://climbclip.vercel.app"
 
