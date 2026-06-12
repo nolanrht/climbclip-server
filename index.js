@@ -93,7 +93,9 @@ const supabase = SUPABASE_URL && process.env.SUPABASE_SERVICE_KEY
 
 const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID
 const GOOGLE_CLIENT_SECRET = process.env.GOOGLE_CLIENT_SECRET
-const sharp = require("sharp")
+const HF_TOKEN = process.env.HF_TOKEN
+if (!HF_TOKEN) console.warn("⚠  HF_TOKEN manquant — l'upscaling d'images sera désactivé.")
+const HF_MODEL = "caidas/swin2SR-realworld-sr-x4-64-bsrgan-psnr"
 const GOOGLE_REDIRECT_URI = "https://climbclip-server.onrender.com/auth/google/callback"
 const FRONTEND_URL = process.env.FRONTEND_URL || "https://climbclip.vercel.app"
 
@@ -295,26 +297,59 @@ app.post("/upscale", uploadLimiter, upload.single("file"), async (req, res) => {
 
   try {
     if (isImage) {
-      // Sharp : lanczos3 resize + unsharp mask pour simuler super-résolution
+      if (!HF_TOKEN) {
+        fs.unlinkSync(filePath)
+        return res.status(503).json({ error: "HF_TOKEN manquant sur le serveur" })
+      }
+
       const inputBuf = fs.readFileSync(filePath)
       fs.unlinkSync(filePath)
+      console.log(`[upscale] calling HF ${HF_MODEL} (${(inputBuf.length/1024).toFixed(0)} KB)`)
 
-      const meta = await sharp(inputBuf).metadata()
-      const newW = (meta.width  || 512) * scale
-      const newH = (meta.height || 512) * scale
-      console.log(`[upscale] image ${meta.width}x${meta.height} → ${newW}x${newH}`)
+      // HF Inference API — envoie l'image en binaire, reçoit l'image upscalée en binaire
+      let hfRes
+      try {
+        hfRes = await axios.post(
+          `https://api-inference.huggingface.co/models/${HF_MODEL}`,
+          inputBuf,
+          {
+            headers: {
+              Authorization: `Bearer ${HF_TOKEN}`,
+              "Content-Type": mimetype,
+              Accept: "image/png",
+            },
+            responseType: "arraybuffer",
+            timeout: 120_000,
+            maxBodyLength: 25 * 1024 * 1024,
+          }
+        )
+      } catch (hfErr) {
+        const status = hfErr.response?.status
+        const body = hfErr.response?.data
+          ? Buffer.from(hfErr.response.data).toString("utf8").slice(0, 300)
+          : hfErr.message
+        console.error(`[upscale] HF error HTTP ${status}:`, body)
+        // 503 = model loading — retourne un message explicite
+        if (status === 503) return res.status(503).json({ error: "Modèle HF en cours de chargement (cold start ~30s) — réessaie dans quelques secondes." })
+        return res.status(502).json({ error: `HF API ${status}: ${body}` })
+      }
 
-      const outputBuf = await sharp(inputBuf)
-        .resize(newW, newH, { kernel: sharp.kernel.lanczos3, fit: "fill" })
-        // unsharp mask : sigma, strength, threshold
-        .sharpen({ sigma: 1.2, m1: 1.5, m2: 0.7, x1: 2, y2: 10, y3: 20 })
-        .toBuffer()
+      const outputBuf = Buffer.from(hfRes.data)
+      console.log(`[upscale] HF done, output=${(outputBuf.length/1024).toFixed(0)} KB`)
 
-      const ext = (mimetype.split("/")[1] || "jpg").replace("jpeg", "jpg")
-      const outputMime = ext === "png" ? "image/png" : ext === "webp" ? "image/webp" : "image/jpeg"
-      const storageKey = `upscaled/${Date.now()}_${Math.random().toString(36).slice(2)}.${ext}`
+      // Le modèle x4 upscale toujours en x4. Si l'user veut x2, on redimensionne en x2 avec sharp.
+      let finalBuf = outputBuf
+      if (scale === 2) {
+        const sharp = require("sharp")
+        const meta = await sharp(inputBuf).metadata()
+        finalBuf = await sharp(outputBuf)
+          .resize((meta.width || 256) * 2, (meta.height || 256) * 2, { kernel: sharp.kernel.lanczos3 })
+          .toBuffer()
+        console.log(`[upscale] downsampled to x2: ${(finalBuf.length/1024).toFixed(0)} KB`)
+      }
 
-      const { error: upErr } = await supabase.storage.from("clips").upload(storageKey, outputBuf, { contentType: outputMime, upsert: false })
+      const storageKey = `upscaled/${Date.now()}_${Math.random().toString(36).slice(2)}.png`
+      const { error: upErr } = await supabase.storage.from("clips").upload(storageKey, finalBuf, { contentType: "image/png", upsert: false })
       if (upErr) {
         console.error("[upscale] Supabase upload error:", upErr)
         return res.status(500).json({ error: "Échec de la sauvegarde image" })
