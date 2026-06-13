@@ -1076,20 +1076,22 @@ Règles timestamps: start+duration<=${Math.round(totalDuration)}, durées 10-30s
 
 const Jimp = require('jimp')
 
-// Radius-15 sample offsets pre-computed once (inverse-distance weighted)
+// Radius-20 sample offsets pre-computed once (Gaussian weighted, σ = R/3)
 const DIFF_SAMPLES = (() => {
-  const R = 15, s = []
+  const R = 20
+  const twoSigmaSq = 2 * (R / 3) * (R / 3)  // σ = R/3 → weight ≈ 0.011 at edge
+  const s = []
   for (let dy = -R; dy <= R; dy++)
     for (let dx = -R; dx <= R; dx++) {
       const d = Math.sqrt(dx * dx + dy * dy)
-      if (d > 0 && d <= R) s.push([dx, dy, 1 / (1 + d)])
+      if (d > 0 && d <= R) s.push([dx, dy, Math.exp(-d * d / twoSigmaSq)])
     }
   return s
 })()
 
-// Fill masked pixels via inverse-distance weighted average of non-masked
-// neighbors within 15px radius. Multiple passes fill interior regions.
-function applyDiffusion(imgBuf, masked, width, height, passes = 6) {
+// Fill masked pixels via Gaussian-weighted average of non-masked neighbors
+// within 20px radius. 5 passes fill deeper interior regions iteratively.
+function applyDiffusion(imgBuf, masked, width, height, passes = 5) {
   const buf = Buffer.from(imgBuf)
   const m = new Uint8Array(masked)
   for (let pass = 0; pass < passes; pass++) {
@@ -1170,8 +1172,26 @@ app.post('/retouch/inpaint', uploadLimiter, uploadMem.single('image'), async (re
     // Dilate 2px to cover brush anti-aliased edges
     const dilated = dilateMask(masked, procW, procH, 2)
 
-    const result = applyDiffusion(imgData, dilated, procW, procH, 6)
-    const out = await sharp(result, { raw: { width: procW, height: procH, channels: 3 } })
+    const result = applyDiffusion(imgData, dilated, procW, procH, 5)
+
+    // Lissage final : fondu feathered sur la zone gommée pour fondre les bords
+    // 1. Blur le masque binaire → gradient d'opacité feathered autour des bords
+    const maskBin = Buffer.alloc(procW * procH)
+    for (let i = 0; i < procW * procH; i++) maskBin[i] = dilated[i] ? 255 : 0
+    const { data: feather } = await sharp(maskBin, { raw: { width: procW, height: procH, channels: 1 } })
+      .blur(3).raw().toBuffer({ resolveWithObject: true })
+    // 2. Légère blur sur le résultat diffusé pour effacer les artefacts de grille
+    const { data: blurredResult } = await sharp(result, { raw: { width: procW, height: procH, channels: 3 } })
+      .blur(1.5).raw().toBuffer({ resolveWithObject: true })
+    // 3. Composite : pixels originaux × (1-α) + résultat flou × α
+    const finalBuf = Buffer.allocUnsafe(procW * procH * 3)
+    for (let i = 0; i < procW * procH; i++) {
+      const a = feather[i] / 255
+      finalBuf[i*3]   = Math.round(imgData[i*3]   * (1-a) + blurredResult[i*3]   * a)
+      finalBuf[i*3+1] = Math.round(imgData[i*3+1] * (1-a) + blurredResult[i*3+1] * a)
+      finalBuf[i*3+2] = Math.round(imgData[i*3+2] * (1-a) + blurredResult[i*3+2] * a)
+    }
+    const out = await sharp(finalBuf, { raw: { width: procW, height: procH, channels: 3 } })
       .jpeg({ quality: 92 }).toBuffer()
     res.json({ result: 'data:image/jpeg;base64,' + out.toString('base64') })
   } catch (err) {
