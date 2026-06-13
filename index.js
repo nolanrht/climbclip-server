@@ -1078,269 +1078,278 @@ const Jimp = require('jimp')
 
 // ── Gommage — inpainting directionnel + PatchMatch NNF top-3 ─────────────────
 
-function bfsOrder(mask, w, h) {
-  const order = [], inQ = new Uint8Array(w * h)
-  for (let i = 0; i < w * h; i++) {
-    if (!mask[i]) continue
-    const x = i % w, y = (i / w) | 0
-    if ((x > 0 && !mask[i-1]) || (x < w-1 && !mask[i+1]) ||
-        (y > 0 && !mask[i-w]) || (y < h-1 && !mask[i+w])) {
-      order.push(i); inQ[i] = 1
-    }
-  }
-  for (let qi = 0; qi < order.length; qi++) {
-    const i = order[qi], x = i % w, y = (i / w) | 0
-    if (x > 0   && mask[i-1] && !inQ[i-1]) { inQ[i-1] = 1; order.push(i-1) }
-    if (x < w-1 && mask[i+1] && !inQ[i+1]) { inQ[i+1] = 1; order.push(i+1) }
-    if (y > 0   && mask[i-w] && !inQ[i-w]) { inQ[i-w] = 1; order.push(i-w) }
-    if (y < h-1 && mask[i+w] && !inQ[i+w]) { inQ[i+w] = 1; order.push(i+w) }
-  }
-  return order
-}
+// ── Inpainting utilitaires ────────────────────────────────────────────────────
 
 function diffuse(px, mask, w, h, passes) {
-  for (let p = 0; p < passes; p++) {
-    const nm = new Uint8Array(mask)
+  for (let pass = 0; pass < passes; pass++) {
+    const snap = new Uint8ClampedArray(px.length); snap.set(px)
     for (let y = 0; y < h; y++) {
       for (let x = 0; x < w; x++) {
         const i = y*w+x; if (!mask[i]) continue
         let r = 0, g = 0, b = 0, wt = 0
-        for (let dy = -3; dy <= 3; dy++) {
-          for (let dx = -3; dx <= 3; dx++) {
-            const nx = x+dx, ny = y+dy
-            if (nx < 0 || ny < 0 || nx >= w || ny >= h) continue
-            const ni = ny*w+nx; if (mask[ni]) continue
-            const d2 = (dx*dx+dy*dy) || 1, i4 = ni*4
-            r += px[i4]/d2; g += px[i4+1]/d2; b += px[i4+2]/d2; wt += 1/d2
-          }
-        }
-        if (wt > 0) {
-          const i4 = i*4
-          px[i4] = r/wt; px[i4+1] = g/wt; px[i4+2] = b/wt; nm[i] = 0
-        }
-      }
-    }
-    let done = true
-    for (let i = 0; i < mask.length; i++) { mask[i] = nm[i]; if (nm[i]) done = false }
-    if (done) break
-  }
-}
-
-function patchSSD(px, qx, qy, sx, sy, w, h, HALF) {
-  let ssd = 0, cnt = 0
-  for (let dy = -HALF; dy <= HALF; dy++) {
-    for (let dx = -HALF; dx <= HALF; dx++) {
-      const ax = qx+dx, ay = qy+dy, bx = sx+dx, by = sy+dy
-      if (ax < 0 || ay < 0 || ax >= w || ay >= h) continue
-      if (bx < 0 || by < 0 || bx >= w || by >= h) continue
-      const ai = (ay*w+ax)*4, bi = (by*w+bx)*4
-      const dr = px[ai]-px[bi], dg = px[ai+1]-px[bi+1], db = px[ai+2]-px[bi+2]
-      ssd += dr*dr + dg*dg + db*db; cnt++
-    }
-  }
-  return cnt > 0 ? ssd/cnt : 1e18
-}
-
-function med3(a, b, c) { return a < b ? (b < c ? b : (a < c ? c : a)) : (a < c ? a : (b < c ? c : b)) }
-
-// PatchMatch NNF top-3 : iters/2 iterations globales puis iters/2 locales radius 50px
-function computeNNF(px, origMask, w, h, HALF, iters) {
-  const N = w * h
-  const order = bfsOrder(origMask, w, h)
-  if (!order.length) return null
-
-  const n1X = new Int16Array(N).fill(-1), n1Y = new Int16Array(N).fill(-1), n1E = new Float32Array(N).fill(1e18)
-  const n2X = new Int16Array(N).fill(-1), n2Y = new Int16Array(N).fill(-1), n2E = new Float32Array(N).fill(1e18)
-  const n3X = new Int16Array(N).fill(-1), n3Y = new Int16Array(N).fill(-1), n3E = new Float32Array(N).fill(1e18)
-
-  const upd = (idx, sx, sy) => {
-    if (sx < HALF || sy < HALF || sx >= w-HALF || sy >= h-HALF || origMask[sy*w+sx]) return
-    const e = patchSSD(px, idx%w, (idx/w)|0, sx, sy, w, h, HALF)
-    if (e < n1E[idx]) {
-      n3E[idx]=n2E[idx]; n3X[idx]=n2X[idx]; n3Y[idx]=n2Y[idx]
-      n2E[idx]=n1E[idx]; n2X[idx]=n1X[idx]; n2Y[idx]=n1Y[idx]
-      n1E[idx]=e; n1X[idx]=sx; n1Y[idx]=sy
-    } else if (e < n2E[idx]) {
-      n3E[idx]=n2E[idx]; n3X[idx]=n2X[idx]; n3Y[idx]=n2Y[idx]
-      n2E[idx]=e; n2X[idx]=sx; n2Y[idx]=sy
-    } else if (e < n3E[idx]) {
-      n3E[idx]=e; n3X[idx]=sx; n3Y[idx]=sy
-    }
-  }
-
-  for (const idx of order) {
-    for (let t = 0; t < 15; t++) {
-      upd(idx,
-        HALF + Math.floor(Math.random() * (w - 2*HALF)),
-        HALF + Math.floor(Math.random() * (h - 2*HALF)))
-    }
-  }
-
-  const half = Math.floor(iters / 2)
-  for (let iter = 0; iter < iters; iter++) {
-    const fwd = iter % 2 === 0
-    const maxR = iter < half ? Math.max(w, h) : 50
-    const pixels = fwd ? order : order.slice().reverse()
-    for (const idx of pixels) {
-      if (!origMask[idx]) continue
-      const qx = idx % w, qy = (idx / w) | 0
-      for (const off of (fwd ? [-1, -w] : [1, w])) {
-        const ni = idx + off
-        if (ni < 0 || ni >= N || n1X[ni] < 0) continue
-        upd(idx, n1X[ni] + (qx - ni%w), n1Y[ni] + (qy - ((ni/w)|0)))
-      }
-      const bx = n1X[idx] >= 0 ? n1X[idx] : qx
-      const by = n1Y[idx] >= 0 ? n1Y[idx] : qy
-      let r = maxR
-      while (r >= 1) {
-        upd(idx,
-          Math.max(HALF, Math.min(w-1-HALF, Math.round(bx + (Math.random()*2-1)*r))),
-          Math.max(HALF, Math.min(h-1-HALF, Math.round(by + (Math.random()*2-1)*r))))
-        r = r >> 1
+        if (x > 0)   { const d = snap[(i-1)*4]; r+=d; g+=snap[(i-1)*4+1]; b+=snap[(i-1)*4+2]; wt++ }
+        if (x < w-1) { const d = snap[(i+1)*4]; r+=d; g+=snap[(i+1)*4+1]; b+=snap[(i+1)*4+2]; wt++ }
+        if (y > 0)   { const d = snap[(i-w)*4]; r+=d; g+=snap[(i-w)*4+1]; b+=snap[(i-w)*4+2]; wt++ }
+        if (y < h-1) { const d = snap[(i+w)*4]; r+=d; g+=snap[(i+w)*4+1]; b+=snap[(i+w)*4+2]; wt++ }
+        if (!wt) continue
+        px[i*4] = r/wt; px[i*4+1] = g/wt; px[i*4+2] = b/wt
       }
     }
   }
-
-  return { n1X, n1Y, n2X, n2Y, n3X, n3Y, order }
 }
 
-function applyNNFMedian(px, w, n1X, n1Y, n2X, n2Y, n3X, n3Y, order) {
-  for (const idx of order) {
-    if (n1X[idx] < 0) continue
-    const i4 = idx*4, s1 = (n1Y[idx]*w+n1X[idx])*4
-    if (n2X[idx] < 0 || n3X[idx] < 0) {
-      px[i4]=px[s1]; px[i4+1]=px[s1+1]; px[i4+2]=px[s1+2]; continue
-    }
-    const s2 = (n2Y[idx]*w+n2X[idx])*4, s3 = (n3Y[idx]*w+n3X[idx])*4
-    px[i4]   = med3(px[s1],   px[s2],   px[s3])
-    px[i4+1] = med3(px[s1+1], px[s2+1], px[s3+1])
-    px[i4+2] = med3(px[s1+2], px[s2+2], px[s3+2])
-  }
-}
-
-// Fond plat : couleur mediane des pixels non-masques dans les 15px autour du masque
-function flatFillMedian(px, origMask, w, h) {
-  const dist = new Uint8Array(w*h).fill(255)
-  const q = []
-  for (let i = 0; i < w*h; i++) if (origMask[i]) { dist[i] = 0; q.push(i) }
-  for (let qi = 0; qi < q.length; qi++) {
-    const i = q[qi], x = i%w, y = (i/w)|0, d = dist[i]+1
-    if (d > 15) continue
-    if (x > 0   && dist[i-1] > d) { dist[i-1] = d; q.push(i-1) }
-    if (x < w-1 && dist[i+1] > d) { dist[i+1] = d; q.push(i+1) }
-    if (y > 0   && dist[i-w] > d) { dist[i-w] = d; q.push(i-w) }
-    if (y < h-1 && dist[i+w] > d) { dist[i+w] = d; q.push(i+w) }
-  }
-  const rv = [], gv = [], bv = []
-  for (let i = 0; i < w*h; i++) {
-    if (origMask[i] || dist[i] > 15) continue
-    const i4 = i*4; rv.push(px[i4]); gv.push(px[i4+1]); bv.push(px[i4+2])
-  }
-  if (!rv.length) return
-  rv.sort((a,b)=>a-b); gv.sort((a,b)=>a-b); bv.sort((a,b)=>a-b)
-  const mid = (rv.length/2)|0, medR = rv[mid], medG = gv[mid], medB = bv[mid]
-  for (let i = 0; i < w*h; i++) {
-    if (!origMask[i]) continue
-    const i4 = i*4; px[i4]=medR; px[i4+1]=medG; px[i4+2]=medB
-  }
-}
-
-// Detecte la direction principale du contenu autour du masque via gradients Sobel
-// Retourne la direction des isophotes (perpendiculaire au gradient moyen)
-function sobelDirection(px, origMask, w, h) {
-  let sgx = 0, sgy = 0, cnt = 0
-  for (let y = 1; y < h-1; y++) {
-    for (let x = 1; x < w-1; x++) {
+function detectStructure(px, origMask, w, h) {
+  const border = []
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
       const i = y*w+x; if (origMask[i]) continue
-      if (!((x > 0 && origMask[i-1]) || (x < w-1 && origMask[i+1]) ||
-            (y > 0 && origMask[i-w]) || (y < h-1 && origMask[i+w]))) continue
-      // Luminance des 8 voisins
-      const lum = (ii) => { const i4 = ii*4; return 0.299*px[i4] + 0.587*px[i4+1] + 0.114*px[i4+2] }
-      const tl = lum((y-1)*w+(x-1)), tc = lum((y-1)*w+x), tr = lum((y-1)*w+(x+1))
-      const ml = lum(y*w+(x-1)),                           mr = lum(y*w+(x+1))
-      const bl = lum((y+1)*w+(x-1)), bc = lum((y+1)*w+x), br = lum((y+1)*w+(x+1))
-      const gx = -tl + tr - 2*ml + 2*mr - bl + br
-      const gy = -tl - 2*tc - tr + bl + 2*bc + br
-      const mag = Math.sqrt(gx*gx + gy*gy)
-      if (mag < 8) continue
-      sgx += gx/mag; sgy += gy/mag; cnt++
+      if ((x > 0 && origMask[i-1]) || (x < w-1 && origMask[i+1]) ||
+          (y > 0 && origMask[i-w]) || (y < h-1 && origMask[i+w])) border.push(i)
     }
   }
-  if (!cnt) return { dx: 1, dy: 0 }
-  const mgx = sgx/cnt, mgy = sgy/cnt
-  // Direction isophote = perpendiculaire au gradient = (-gy, gx)
-  const iphx = -mgy, iphy = mgx
-  const m = Math.sqrt(iphx*iphx + iphy*iphy) || 1
-  const adx = Math.abs(iphx/m), ady = Math.abs(iphy/m)
-  if (adx > 0.8 && ady < 0.4) return { dx: iphx > 0 ? 1 : -1, dy: 0 }
-  if (ady > 0.8 && adx < 0.4) return { dx: 0, dy: iphy > 0 ? 1 : -1 }
-  return { dx: iphx > 0 ? 1 : -1, dy: iphy > 0 ? 1 : -1 }
-}
-
-// Inpainting directionnel : propage depuis l'exterieur du masque vers l'interieur
-// le long de la direction des isophotes
-function directionalInpaint(px, origMask, w, h, dx, dy) {
-  const workMask = new Uint8Array(origMask)
-  const bfsOrd = bfsOrder(origMask, w, h)
-  for (let pass = 0; pass < 3; pass++) {
-    let filled = 0
-    for (const idx of bfsOrd) {
-      if (!workMask[idx]) continue
-      const x = idx%w, y = (idx/w)|0
-      let bestDist = 999, bestSi = -1
-      // Cherche dans les deux sens de la direction
-      for (const [ddx, ddy] of [[dx, dy], [-dx, -dy]]) {
-        let sx = x+ddx, sy = y+ddy, d = 1
-        while (sx >= 0 && sy >= 0 && sx < w && sy < h && d <= 60) {
-          const si = sy*w+sx
-          if (!workMask[si]) { if (d < bestDist) { bestDist = d; bestSi = si }; break }
-          sx += ddx; sy += ddy; d++
-        }
-      }
-      if (bestSi >= 0) {
-        const i4 = idx*4, si4 = bestSi*4
-        px[i4]=px[si4]; px[i4+1]=px[si4+1]; px[i4+2]=px[si4+2]
-        workMask[idx] = 0; filled++
-      }
-    }
-    if (!filled) break
+  if (!border.length) return 'flat'
+  let mr = 0, mg = 0, mb = 0
+  for (const i of border) { mr += px[i*4]; mg += px[i*4+1]; mb += px[i*4+2] }
+  mr /= border.length; mg /= border.length; mb /= border.length
+  let v = 0
+  for (const i of border) {
+    const dr = px[i*4]-mr, dg = px[i*4+1]-mg, db = px[i*4+2]-mb
+    v += dr*dr + dg*dg + db*db
   }
+  v /= border.length
+  if (v < 20) return 'flat'
+  if (v < 4000) return 'gradient'
+  return 'texture'
 }
 
-// Correction de couleur pixel par pixel : aligne la luminosite de chaque pixel rempli
-// sur la moyenne de ses voisins non-masques sur 3px
-function pixelColorCorrection(px, origMask, w, h) {
+function flatFillMedian(px, origMask, w, h) {
+  const R = 15
+  const rs = [], gs = [], bs = []
   for (let y = 0; y < h; y++) {
     for (let x = 0; x < w; x++) {
       const i = y*w+x; if (!origMask[i]) continue
-      let sumL = 0, cnt = 0
-      for (let dy = -3; dy <= 3; dy++) {
-        for (let dx = -3; dx <= 3; dx++) {
+      let found = false
+      for (let dy = -R; dy <= R && !found; dy++) {
+        for (let dx = -R; dx <= R && !found; dx++) {
           const nx = x+dx, ny = y+dy
           if (nx < 0 || ny < 0 || nx >= w || ny >= h) continue
           const ni = ny*w+nx; if (origMask[ni]) continue
-          const n4 = ni*4
-          sumL += 0.299*px[n4] + 0.587*px[n4+1] + 0.114*px[n4+2]; cnt++
+          rs.push(px[ni*4]); gs.push(px[ni*4+1]); bs.push(px[ni*4+2]); found = true
         }
       }
+    }
+  }
+  if (!rs.length) return
+  rs.sort((a,b)=>a-b); gs.sort((a,b)=>a-b); bs.sort((a,b)=>a-b)
+  const mr = rs[rs.length>>1], mg = gs[gs.length>>1], mb = bs[bs.length>>1]
+  for (let i = 0; i < w*h; i++) {
+    if (!origMask[i]) continue
+    px[i*4] = mr; px[i*4+1] = mg; px[i*4+2] = mb; px[i*4+3] = 255
+  }
+}
+
+// ── Criminisi exemplar-based inpainting ───────────────────────────────────────
+function criminisi(px, origMask, w, h) {
+  const HALF = 4      // 9x9 patch
+  const N    = w * h
+  const K    = 60     // candidats aleatoires pour la recherche de patch
+
+  // Confiance C[i] : 1 pour pixels connus, 0 pour pixels masques
+  const C = new Float32Array(N)
+  for (let i = 0; i < N; i++) C[i] = origMask[i] ? 0 : 1
+
+  // Masque de travail (mutable)
+  const mask = new Uint8Array(origMask)
+
+  // Luminance
+  const lum = (i) => {
+    const i4 = i*4
+    return 0.299*px[i4] + 0.587*px[i4+1] + 0.114*px[i4+2]
+  }
+
+  // Terme de confiance C(p) = moyenne des confiances dans le patch 9x9
+  const computeConf = (cx, cy) => {
+    let sum = 0, cnt = 0
+    for (let dy = -HALF; dy <= HALF; dy++) {
+      for (let dx = -HALF; dx <= HALF; dx++) {
+        const nx = cx+dx, ny = cy+dy
+        if (nx < 0 || ny < 0 || nx >= w || ny >= h) continue
+        sum += C[ny*w+nx]; cnt++
+      }
+    }
+    return cnt > 0 ? sum/cnt : 0
+  }
+
+  // Terme de donnee D(p) = |isophote . normale_masque|
+  const computeData = (cx, cy) => {
+    const i = cy*w+cx
+    // Gradient image sur les pixels connus adjacents
+    let gx = 0, gy = 0, gcnt = 0
+    if (cx > 0   && !mask[i-1]) { gx -= lum(i-1); gcnt++ }
+    if (cx < w-1 && !mask[i+1]) { gx += lum(i+1); gcnt++ }
+    if (cy > 0   && !mask[i-w]) { gy -= lum(i-w); gcnt++ }
+    if (cy < h-1 && !mask[i+w]) { gy += lum(i+w); gcnt++ }
+    if (!gcnt) return 0.001
+    const mag = Math.sqrt(gx*gx + gy*gy)
+    if (mag < 1) return 0.001
+    // Direction isophote (perpendiculaire au gradient)
+    const iphX = -gy/mag, iphY = gx/mag
+    // Normale sortante du masque (vers la region source)
+    let nx = 0, ny = 0
+    if (cx > 0   && !mask[i-1]) nx -= 1
+    if (cx < w-1 && !mask[i+1]) nx += 1
+    if (cy > 0   && !mask[i-w]) ny -= 1
+    if (cy < h-1 && !mask[i+w]) ny += 1
+    const nm = Math.sqrt(nx*nx + ny*ny) || 1
+    return Math.abs(iphX * nx/nm + iphY * ny/nm) + 0.001
+  }
+
+  // Recherche du meilleur patch source par echantillonnage aleatoire
+  const findBestPatch = (cx, cy) => {
+    let bestSSD = 1e18, bestSx = -1, bestSy = -1
+    for (let c = 0; c < K; c++) {
+      const sx = HALF + Math.floor(Math.random() * (w - 2*HALF))
+      const sy = HALF + Math.floor(Math.random() * (h - 2*HALF))
+      if (mask[sy*w+sx]) continue
+      let ssd = 0, cnt = 0
+      for (let dy = -HALF; dy <= HALF; dy++) {
+        for (let dx = -HALF; dx <= HALF; dx++) {
+          // Pixel query : doit etre connu (non masque)
+          const ax = cx+dx, ay = cy+dy
+          if (ax < 0 || ay < 0 || ax >= w || ay >= h || mask[ay*w+ax]) continue
+          // Pixel source : doit etre connu aussi
+          const bx = sx+dx, by = sy+dy
+          if (bx < 0 || by < 0 || bx >= w || by >= h || mask[by*w+bx]) continue
+          const ai = (ay*w+ax)*4, bi = (by*w+bx)*4
+          const dr = px[ai]-px[bi], dg = px[ai+1]-px[bi+1], db = px[ai+2]-px[bi+2]
+          ssd += dr*dr + dg*dg + db*db; cnt++
+        }
+      }
+      if (cnt >= 4 && ssd/cnt < bestSSD) {
+        bestSSD = ssd/cnt; bestSx = sx; bestSy = sy
+      }
+    }
+    return { sx: bestSx, sy: bestSy }
+  }
+
+  // Initialisation du front (bord du masque)
+  const front = new Set()
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      const i = y*w+x; if (!mask[i]) continue
+      if ((x > 0 && !mask[i-1]) || (x < w-1 && !mask[i+1]) ||
+          (y > 0 && !mask[i-w]) || (y < h-1 && !mask[i+w])) {
+        front.add(i)
+      }
+    }
+  }
+
+  const maxIter = N
+  let iter = 0
+
+  while (front.size > 0 && iter < maxIter) {
+    // Pixel de bord avec la priorite maximale P(p) = C(p) * D(p)
+    let bestP = -1, bestPri = -1
+    for (const idx of front) {
+      const cx = idx % w, cy = (idx / w) | 0
+      const pri = computeConf(cx, cy) * computeData(cx, cy)
+      if (pri > bestPri) { bestPri = pri; bestP = idx }
+    }
+    if (bestP < 0) break
+
+    const cx = bestP % w, cy = (bestP / w) | 0
+    const { sx, sy } = findBestPatch(cx, cy)
+
+    if (sx < 0) {
+      // Aucun patch valide : retire ce pixel du front et continue
+      front.delete(bestP)
+      iter++
+      continue
+    }
+
+    const newConf = computeConf(cx, cy)
+
+    // Copie du patch entier et mise a jour du masque/confiance
+    for (let dy = -HALF; dy <= HALF; dy++) {
+      for (let dx = -HALF; dx <= HALF; dx++) {
+        const tx = cx+dx, ty = cy+dy
+        if (tx < 0 || ty < 0 || tx >= w || ty >= h) continue
+        const ti = ty*w+tx
+        if (!mask[ti]) continue   // pixel deja connu : ne pas ecraser
+        const srcx = sx+dx, srcy = sy+dy
+        if (srcx < 0 || srcy < 0 || srcx >= w || srcy >= h) continue
+        if (mask[srcy*w+srcx]) continue  // source masquee : ignorer
+        const si4 = (srcy*w+srcx)*4, ti4 = ti*4
+        px[ti4] = px[si4]; px[ti4+1] = px[si4+1]
+        px[ti4+2] = px[si4+2]; px[ti4+3] = 255
+        C[ti] = newConf
+        mask[ti] = 0
+        front.delete(ti)
+        // Revele potentiellement de nouveaux pixels de bord
+        if (tx > 0   && mask[ti-1]) front.add(ti-1)
+        if (tx < w-1 && mask[ti+1]) front.add(ti+1)
+        if (ty > 0   && mask[ti-w]) front.add(ti-w)
+        if (ty < h-1 && mask[ti+w]) front.add(ti+w)
+      }
+    }
+
+    iter++
+  }
+
+  // Secours : diffusion pour les pixels eventuellement non remplis
+  const remaining = new Uint8Array(w*h)
+  for (let i = 0; i < N; i++) remaining[i] = mask[i]
+  let anyLeft = false
+  for (let i = 0; i < N; i++) if (remaining[i]) { anyLeft = true; break }
+  if (anyLeft) diffuse(px, remaining, w, h, 10)
+}
+
+// ── Poisson blending simplifie : continuite de gradient au bord ───────────────
+function poissonBlend(px, origMask, w, h, R, iters) {
+  // Identifie les pixels remplis proches du bord du masque
+  const near = new Uint8Array(w*h)
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      const i = y*w+x; if (!origMask[i]) continue
+      const isBorder = (x > 0 && !origMask[i-1]) || (x < w-1 && !origMask[i+1]) ||
+                       (y > 0 && !origMask[i-w]) || (y < h-1 && !origMask[i+w])
+      if (!isBorder) continue
+      for (let dy = -R; dy <= R; dy++) {
+        for (let dx = -R; dx <= R; dx++) {
+          const nx = x+dx, ny = y+dy
+          if (nx >= 0 && ny >= 0 && nx < w && ny < h && origMask[ny*w+nx])
+            near[ny*w+nx] = 1
+        }
+      }
+    }
+  }
+  // Resolution iterative de Laplace (Jacobi) sur ces pixels
+  for (let it = 0; it < iters; it++) {
+    const snap = new Uint8ClampedArray(px.length); snap.set(px)
+    for (let i = 0; i < w*h; i++) {
+      if (!near[i]) continue
+      const x = i % w, y = (i / w) | 0
+      let r = 0, g = 0, b = 0, cnt = 0
+      if (x > 0)   { r+=snap[(i-1)*4]; g+=snap[(i-1)*4+1]; b+=snap[(i-1)*4+2]; cnt++ }
+      if (x < w-1) { r+=snap[(i+1)*4]; g+=snap[(i+1)*4+1]; b+=snap[(i+1)*4+2]; cnt++ }
+      if (y > 0)   { r+=snap[(i-w)*4]; g+=snap[(i-w)*4+1]; b+=snap[(i-w)*4+2]; cnt++ }
+      if (y < h-1) { r+=snap[(i+w)*4]; g+=snap[(i+w)*4+1]; b+=snap[(i+w)*4+2]; cnt++ }
       if (!cnt) continue
-      const avgL = sumL/cnt
-      const i4 = i*4
-      const myL = 0.299*px[i4] + 0.587*px[i4+1] + 0.114*px[i4+2]
-      const delta = avgL - myL
-      if (Math.abs(delta) < 1) continue
-      px[i4]   = Math.max(0, Math.min(255, Math.round(px[i4]   + delta)))
-      px[i4+1] = Math.max(0, Math.min(255, Math.round(px[i4+1] + delta)))
-      px[i4+2] = Math.max(0, Math.min(255, Math.round(px[i4+2] + delta)))
+      px[i*4]   = Math.round(r/cnt)
+      px[i*4+1] = Math.round(g/cnt)
+      px[i*4+2] = Math.round(b/cnt)
     }
   }
 }
 
-// Feathering 12px avec blending exponentiel : transition rapide au bord, plein rempli au centre
+// ── Feathering avec courbe Bezier (smoothstep cubique) sur R pixels ───────────
 function featherBlend(px, origMask, w, h, R) {
-  const dist = new Uint8Array(w*h).fill(255)
+  // BFS pour la distance de chaque pixel masque au bord non-masque
+  const dist = new Uint16Array(w*h).fill(65535)
   const q = []
-  for (let i = 0; i < w*h; i++) if (!origMask[i]) { dist[i] = 0; q.push(i) }
+  for (let i = 0; i < w*h; i++) {
+    if (!origMask[i]) { dist[i] = 0; q.push(i) }
+  }
   for (let qi = 0; qi < q.length; qi++) {
     const i = q[qi], x = i%w, y = (i/w)|0, d = dist[i]+1
     if (d > R) continue
@@ -1349,103 +1358,73 @@ function featherBlend(px, origMask, w, h, R) {
     if (y > 0   && dist[i-w] > d) { dist[i-w] = d; q.push(i-w) }
     if (y < h-1 && dist[i+w] > d) { dist[i+w] = d; q.push(i+w) }
   }
+  // Pour chaque pixel masque dans la zone de feathering, on blend avec les pixels sources
   const snap = Buffer.from(px)
   for (let i = 0; i < w*h; i++) {
-    const d = dist[i]; if (!origMask[i] || d > R) continue
-    // Blending exponentiel : 0 au bord -> 1 au centre du masque
-    const alpha = 1 - Math.exp(-5 * d / R)
+    if (!origMask[i]) continue
+    const d = dist[i]; if (d >= R) continue
+    // Courbe Bezier cubique (smoothstep) : alpha = 3t^2 - 2t^3
+    const t = d / R
+    const alpha = t*t*(3 - 2*t)
+    // Couleur des pixels sources voisins (ponderes par 1/distance^2)
     const x = i%w, y = (i/w)|0
-    let r = 0, g = 0, b = 0, wt = 0
+    let sr = 0, sg = 0, sb = 0, wt = 0
     for (let dy = -R; dy <= R; dy++) {
       for (let dx = -R; dx <= R; dx++) {
         const nx = x+dx, ny = y+dy
         if (nx < 0 || ny < 0 || nx >= w || ny >= h) continue
         const ni = ny*w+nx; if (origMask[ni]) continue
-        const d2 = (dx*dx+dy*dy) || 1, n4 = ni*4
-        r += snap[n4]/d2; g += snap[n4+1]/d2; b += snap[n4+2]/d2; wt += 1/d2
+        const d2 = dx*dx + dy*dy || 1, n4 = ni*4
+        sr += snap[n4]/d2; sg += snap[n4+1]/d2; sb += snap[n4+2]/d2; wt += 1/d2
       }
     }
     if (!wt) continue
     const i4 = i*4
-    px[i4]   = Math.round(px[i4]   * alpha + (r/wt) * (1-alpha))
-    px[i4+1] = Math.round(px[i4+1] * alpha + (g/wt) * (1-alpha))
-    px[i4+2] = Math.round(px[i4+2] * alpha + (b/wt) * (1-alpha))
+    px[i4]   = Math.round(px[i4]   * alpha + (sr/wt) * (1-alpha))
+    px[i4+1] = Math.round(px[i4+1] * alpha + (sg/wt) * (1-alpha))
+    px[i4+2] = Math.round(px[i4+2] * alpha + (sb/wt) * (1-alpha))
   }
 }
 
 function colorCoherence(px, origMask, w, h, R) {
-  const snap = Buffer.from(px)
   for (let y = 0; y < h; y++) {
     for (let x = 0; x < w; x++) {
       const i = y*w+x; if (!origMask[i]) continue
-      let r = 0, g = 0, b = 0, cnt = 0
+      let r = 0, g = 0, b = 0, wt = 0
       for (let dy = -R; dy <= R; dy++) {
         for (let dx = -R; dx <= R; dx++) {
           const nx = x+dx, ny = y+dy
           if (nx < 0 || ny < 0 || nx >= w || ny >= h) continue
           const ni = ny*w+nx; if (origMask[ni]) continue
-          const n4 = ni*4; r += snap[n4]; g += snap[n4+1]; b += snap[n4+2]; cnt++
+          r += px[ni*4]; g += px[ni*4+1]; b += px[ni*4+2]; wt++
         }
       }
-      if (!cnt) continue
-      const i4 = i*4, f = 0.3
-      px[i4]   = Math.round(px[i4]   * (1-f) + (r/cnt) * f)
-      px[i4+1] = Math.round(px[i4+1] * (1-f) + (g/cnt) * f)
-      px[i4+2] = Math.round(px[i4+2] * (1-f) + (b/cnt) * f)
+      if (!wt) continue
+      const i4 = i*4
+      px[i4]   = Math.round(px[i4]   * 0.7 + (r/wt) * 0.3)
+      px[i4+1] = Math.round(px[i4+1] * 0.7 + (g/wt) * 0.3)
+      px[i4+2] = Math.round(px[i4+2] * 0.7 + (b/wt) * 0.3)
     }
   }
 }
 
 function matchLuminance(px, origMask, w, h) {
-  let fR = 0, fG = 0, fB = 0, fN = 0, nR = 0, nG = 0, nB = 0, nN = 0
-  for (let y = 0; y < h; y++) {
-    for (let x = 0; x < w; x++) {
-      const i = y*w+x, i4 = i*4
-      if (origMask[i]) {
-        fR += px[i4]; fG += px[i4+1]; fB += px[i4+2]; fN++
-      } else if (
-        (x > 0   && origMask[i-1]) || (x < w-1 && origMask[i+1]) ||
-        (y > 0   && origMask[i-w]) || (y < h-1 && origMask[i+w])
-      ) {
-        nR += px[i4]; nG += px[i4+1]; nB += px[i4+2]; nN++
-      }
-    }
+  let sl = 0, fl = 0, scnt = 0, fcnt = 0
+  for (let i = 0; i < w*h; i++) {
+    const l = 0.299*px[i*4] + 0.587*px[i*4+1] + 0.114*px[i*4+2]
+    if (origMask[i]) { fl += l; fcnt++ }
+    else { sl += l; scnt++ }
   }
-  if (!fN || !nN) return
-  const dR = (nR/nN - fR/fN) * 0.5
-  const dG = (nG/nN - fG/fN) * 0.5
-  const dB = (nB/nN - fB/fN) * 0.5
+  if (!fcnt || !scnt) return
+  const delta = (sl/scnt) - (fl/fcnt)
+  if (Math.abs(delta) < 2) return
   for (let i = 0; i < w*h; i++) {
     if (!origMask[i]) continue
     const i4 = i*4
-    px[i4]   = Math.max(0, Math.min(255, Math.round(px[i4]   + dR)))
-    px[i4+1] = Math.max(0, Math.min(255, Math.round(px[i4+1] + dG)))
-    px[i4+2] = Math.max(0, Math.min(255, Math.round(px[i4+2] + dB)))
+    px[i4]   = Math.max(0, Math.min(255, px[i4]   + delta))
+    px[i4+1] = Math.max(0, Math.min(255, px[i4+1] + delta))
+    px[i4+2] = Math.max(0, Math.min(255, px[i4+2] + delta))
   }
-}
-
-function detectStructure(px, origMask, w, h) {
-  let r = 0, g = 0, b = 0, cnt = 0
-  const rv = [], gv = [], bv = []
-  for (let y = 0; y < h; y++) {
-    for (let x = 0; x < w; x++) {
-      const i = y*w+x; if (origMask[i]) continue
-      if (!((x > 0 && origMask[i-1]) || (x < w-1 && origMask[i+1]) ||
-            (y > 0 && origMask[i-w]) || (y < h-1 && origMask[i+w]))) continue
-      const i4 = i*4
-      rv.push(px[i4]); gv.push(px[i4+1]); bv.push(px[i4+2])
-      r += px[i4]; g += px[i4+1]; b += px[i4+2]; cnt++
-    }
-  }
-  if (!cnt) return 'texture'
-  const mr = r/cnt, mg = g/cnt, mb = b/cnt
-  let v = 0
-  for (let i = 0; i < rv.length; i++) {
-    const dr = rv[i]-mr, dg = gv[i]-mg, db = bv[i]-mb
-    v += dr*dr + dg*dg + db*db
-  }
-  v /= cnt
-  return v < 20 ? 'flat' : v < 4000 ? 'gradient' : 'texture'
 }
 
 app.post("/retouch/inpaint", uploadLimiter, async (req, res) => {
@@ -1459,11 +1438,14 @@ app.post("/retouch/inpaint", uploadLimiter, async (req, res) => {
     const img = await Jimp.read(imgBuf)
     const msk = await Jimp.read(mskBuf)
 
-    // Traitement a la resolution originale — aucun resize
-    const W = img.getWidth(), H = img.getHeight()
-
-    // Synchronise les dimensions du masque si necessaire
-    if (msk.getWidth() !== W || msk.getHeight() !== H) {
+    // Plafond 800px : Criminisi est O(masque x image), trop lent sur grand format
+    const origW = img.getWidth(), origH = img.getHeight()
+    const sc = Math.min(1, 800 / Math.max(origW, origH))
+    const W = Math.round(origW * sc), H = Math.round(origH * sc)
+    if (sc < 1) {
+      img.resize(W, H, Jimp.RESIZE_BICUBIC)
+      msk.resize(W, H, Jimp.RESIZE_NEAREST_NEIGHBOR)
+    } else if (msk.getWidth() !== W || msk.getHeight() !== H) {
       msk.resize(W, H, Jimp.RESIZE_NEAREST_NEIGHBOR)
     }
 
@@ -1479,7 +1461,7 @@ app.post("/retouch/inpaint", uploadLimiter, async (req, res) => {
     if (struct === 'flat') {
       flatFillMedian(px, origMask, W, H)
     } else {
-      // ── Init multi-echelle 1/4 resolution (plafonne a 150px) ───────────────
+      // Init multi-echelle 1/4 resolution (max 150px) pour la structure globale
       const QW = Math.max(4, Math.min(150, Math.round(W/4)))
       const QH = Math.max(4, Math.min(150, Math.round(H/4)))
       const qPx  = new Uint8ClampedArray(QW * QH * 4)
@@ -1504,33 +1486,20 @@ app.post("/retouch/inpaint", uploadLimiter, async (req, res) => {
         }
       }
 
-      // ── Diffusion pleine resolution ─────────────────────────────────────────
-      const wm = new Uint8Array(origMask)
-      diffuse(px, wm, W, H, struct === 'gradient' ? 10 : 2)
-
-      // ── Inpainting directionnel via gradients Sobel ─────────────────────────
-      const dir = sobelDirection(px, origMask, W, H)
-      directionalInpaint(px, origMask, W, H, dir.dx, dir.dy)
-
-      // ── PatchMatch NNF top-3 (6 iters : 3 global + 3 local 50px) ───────────
-      const pmIters = struct === 'gradient' ? 2 : 6
-      const nnf = computeNNF(px, origMask, W, H, 3, pmIters)
-      if (nnf) applyNNFMedian(px, W, nnf.n1X, nnf.n1Y, nnf.n2X, nnf.n2Y, nnf.n3X, nnf.n3Y, nnf.order)
+      // Algorithmethme Criminisi : inpainting par exemplar
+      criminisi(px, origMask, W, H)
     }
 
-    // ── Correction couleur pixel par pixel (luminosite sur 3px) ────────────
-    pixelColorCorrection(px, origMask, W, H)
+    // Poisson blending (continuite de gradient) sur 4px autour du bord
+    poissonBlend(px, origMask, W, H, 4, 20)
 
-    // ── Coherence couleur (30%, 5px) ────────────────────────────────────────
+    // Feathering 15px avec courbe Bezier cubique (smoothstep)
+    featherBlend(px, origMask, W, H, 15)
+
+    // Coherence couleur et ajustement luminosite
     colorCoherence(px, origMask, W, H, 5)
-
-    // ── Feathering exponentiel 12px ─────────────────────────────────────────
-    featherBlend(px, origMask, W, H, 12)
-
-    // ── Ajustement luminosite/contraste global ──────────────────────────────
     matchLuminance(px, origMask, W, H)
 
-    // PNG lossless — aucune compression avec perte, qualite maximale
     img.quality(100)
     const result = await img.getBufferAsync(Jimp.MIME_PNG)
     res.json({ result: "data:image/png;base64," + result.toString("base64") })
