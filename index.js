@@ -1142,55 +1142,71 @@ function dilateMask(m, width, height, r) {
   return out
 }
 
-// ── Gommage (canvas mask → inpaint) ─────────────────────────────────────────
+// ── Gommage — JSON body, jimp pour image + masque, diffusion Gaussienne ──────
 
-app.post('/retouch/inpaint', uploadLimiter, uploadMem.single('image'), async (req, res) => {
-  const { mask } = req.body
-  if (!req.file || !mask) return res.status(400).json({ error: 'Image ou masque manquant' })
+app.post('/retouch/inpaint', uploadLimiter, async (req, res) => {
+  const { image, mask } = req.body
+  if (!image || !mask) return res.status(400).json({ error: 'image et mask requis (base64)' })
   try {
-    const imageBuffer = req.file.buffer
-    const meta = await sharp(imageBuffer).metadata()
-    const maxDim = 1500
-    const scale = Math.min(1, maxDim / Math.max(meta.width, meta.height))
-    const procW = Math.round(meta.width * scale), procH = Math.round(meta.height * scale)
+    // 1. Charge image et masque avec jimp depuis les data-URL base64
+    const imgBuf = Buffer.from(image.replace(/^data:image\/[a-z+]+;base64,/, ''), 'base64')
+    const mskBuf = Buffer.from(mask.replace(/^data:image\/[a-z+]+;base64,/, ''), 'base64')
 
-    // Load image pixels (RGB, no alpha)
-    const { data: imgData } = await sharp(imageBuffer)
-      .resize(procW, procH).removeAlpha().raw().toBuffer({ resolveWithObject: true })
+    const imgJimp = await Jimp.read(imgBuf)
+    const mskJimp = await Jimp.read(mskBuf)
 
-    // Decode canvas mask with jimp — handles PNG with alpha reliably
-    const maskRaw = Buffer.from(mask.replace(/^data:image\/[a-z]+;base64,/, ''), 'base64')
-    const maskImg = await Jimp.read(maskRaw)
-    maskImg.resize(procW, procH, Jimp.RESIZE_NEAREST_NEIGHBOR)
-    const maskPx = maskImg.bitmap.data  // RGBA bytes, 4 per pixel
+    // 2. Redimensionne à 1500px max sur le grand côté
+    const origW = imgJimp.getWidth(), origH = imgJimp.getHeight()
+    const scale = Math.min(1, 1500 / Math.max(origW, origH))
+    const procW = Math.round(origW * scale), procH = Math.round(origH * scale)
+    if (scale < 1) imgJimp.resize(procW, procH, Jimp.RESIZE_BICUBIC)
+    mskJimp.resize(procW, procH, Jimp.RESIZE_NEAREST_NEIGHBOR)
+
+    const imgPx = imgJimp.bitmap.data  // RGBA × (procW × procH)
+    const mskPx = mskJimp.bitmap.data  // RGBA × (procW × procH)
+
+    // 3. Masque binaire : pixel blanc du canvas (R > 80) = zone à remplir
     const masked = new Uint8Array(procW * procH)
     for (let i = 0; i < procW * procH; i++) {
-      // White brush strokes (R > 80) = zone à effacer
-      masked[i] = maskPx[i * 4] > 80 ? 1 : 0
+      masked[i] = mskPx[i * 4] > 80 ? 1 : 0
     }
 
-    // Dilate 2px to cover brush anti-aliased edges
+    // 4. Dilation 2px pour couvrir les bords anti-aliasés du pinceau
     const dilated = dilateMask(masked, procW, procH, 2)
 
-    const result = applyDiffusion(imgData, dilated, procW, procH, 5)
+    // 5. Buffer de travail RGB extrait depuis jimp (RGBA → RGB)
+    const rgbBuf = Buffer.allocUnsafe(procW * procH * 3)
+    for (let i = 0; i < procW * procH; i++) {
+      rgbBuf[i * 3]     = imgPx[i * 4]
+      rgbBuf[i * 3 + 1] = imgPx[i * 4 + 1]
+      rgbBuf[i * 3 + 2] = imgPx[i * 4 + 2]
+    }
 
-    // Lissage final : fondu feathered sur la zone gommée pour fondre les bords
-    // 1. Blur le masque binaire → gradient d'opacité feathered autour des bords
+    // 6. Diffusion Gaussienne rayon 20px, 5 passes
+    const diffused = applyDiffusion(rgbBuf, dilated, procW, procH, 5)
+
+    // 7. Lissage feathered : fondu progressif sur les bords de la zone gommée
+    //    - masque binaire blurré → gradient d'opacité α
+    //    - résultat diffusé légèrement blurré → estompe les artefacts
+    //    - composite : original × (1-α) + diffusé_flou × α
     const maskBin = Buffer.alloc(procW * procH)
     for (let i = 0; i < procW * procH; i++) maskBin[i] = dilated[i] ? 255 : 0
+
     const { data: feather } = await sharp(maskBin, { raw: { width: procW, height: procH, channels: 1 } })
       .blur(3).raw().toBuffer({ resolveWithObject: true })
-    // 2. Légère blur sur le résultat diffusé pour effacer les artefacts de grille
-    const { data: blurredResult } = await sharp(result, { raw: { width: procW, height: procH, channels: 3 } })
+
+    const { data: blurred } = await sharp(diffused, { raw: { width: procW, height: procH, channels: 3 } })
       .blur(1.5).raw().toBuffer({ resolveWithObject: true })
-    // 3. Composite : pixels originaux × (1-α) + résultat flou × α
+
     const finalBuf = Buffer.allocUnsafe(procW * procH * 3)
     for (let i = 0; i < procW * procH; i++) {
       const a = feather[i] / 255
-      finalBuf[i*3]   = Math.round(imgData[i*3]   * (1-a) + blurredResult[i*3]   * a)
-      finalBuf[i*3+1] = Math.round(imgData[i*3+1] * (1-a) + blurredResult[i*3+1] * a)
-      finalBuf[i*3+2] = Math.round(imgData[i*3+2] * (1-a) + blurredResult[i*3+2] * a)
+      finalBuf[i * 3]     = Math.round(rgbBuf[i * 3]     * (1 - a) + blurred[i * 3]     * a)
+      finalBuf[i * 3 + 1] = Math.round(rgbBuf[i * 3 + 1] * (1 - a) + blurred[i * 3 + 1] * a)
+      finalBuf[i * 3 + 2] = Math.round(rgbBuf[i * 3 + 2] * (1 - a) + blurred[i * 3 + 2] * a)
     }
+
+    // 8. Encode en JPEG et retourne en base64
     const out = await sharp(finalBuf, { raw: { width: procW, height: procH, channels: 3 } })
       .jpeg({ quality: 92 }).toBuffer()
     res.json({ result: 'data:image/jpeg;base64,' + out.toString('base64') })
