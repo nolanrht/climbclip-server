@@ -1140,26 +1140,7 @@ function dilateMask(m, width, height, r) {
   return out
 }
 
-// ── Gommage — LaMa (HuggingFace Spaces) + fallback diffusion locale ──────────
-
-// Parse le résultat brut du client Gradio vers un Buffer JPEG
-async function parseLaMaResult(data) {
-  if (!data) return null
-  // Gradio 4.x FileData : { url, name, orig_name, ... }
-  if (data.url) {
-    const r = await fetch(data.url)
-    if (!r.ok) throw new Error(`fetch result ${r.status}`)
-    return Buffer.from(await r.arrayBuffer())
-  }
-  // data:image/... base64
-  if (typeof data === 'string' && data.startsWith('data:')) {
-    return Buffer.from(data.replace(/^data:image\/[a-z+]+;base64,/, ''), 'base64')
-  }
-  // ArrayBuffer ou Blob brut
-  if (data instanceof ArrayBuffer) return Buffer.from(data)
-  if (typeof data === 'object' && data.arrayBuffer) return Buffer.from(await data.arrayBuffer())
-  return null
-}
+// ── Gommage (canvas mask → inpaint) ─────────────────────────────────────────
 
 app.post('/retouch/inpaint', uploadLimiter, uploadMem.single('image'), async (req, res) => {
   const { mask } = req.body
@@ -1171,81 +1152,24 @@ app.post('/retouch/inpaint', uploadLimiter, uploadMem.single('image'), async (re
     const scale = Math.min(1, maxDim / Math.max(meta.width, meta.height))
     const procW = Math.round(meta.width * scale), procH = Math.round(meta.height * scale)
 
-    const maskRaw = Buffer.from(mask.replace(/^data:image\/[a-z]+;base64,/, ''), 'base64')
-
-    // ── Tentative LaMa via Gradio (HuggingFace Spaces) ───────────────────────
-    let lamaB64 = null
-    try {
-      const procImgBuf = await sharp(imageBuffer)
-        .resize(procW, procH).jpeg({ quality: 95 }).toBuffer()
-      // Masque binaire : blanc = zone à effacer (format attendu par LaMa)
-      const procMaskBuf = await sharp(maskRaw)
-        .resize(procW, procH).greyscale().png().toBuffer()
-
-      const { Client } = await import('@gradio/client')
-
-      // Essaie les deux spaces connus, premier connecté gagne
-      const SPACES = [
-        'smartywillows/lama-cleaner-lama',
-        'Sanster/lama-cleaner-lama',
-      ]
-      let client = null
-      for (const sid of SPACES) {
-        try {
-          client = await Promise.race([
-            Client.connect(sid),
-            new Promise((_, rej) => setTimeout(() => rej(new Error('connect timeout')), 20000)),
-          ])
-          console.log(`[inpaint] LaMa connecté : ${sid}`)
-          break
-        } catch (e) {
-          console.warn(`[inpaint] ${sid} inaccessible :`, e.message)
-        }
-      }
-      if (!client) throw new Error('aucun Space LaMa joignable')
-
-      const imgBlob = new Blob([procImgBuf], { type: 'image/jpeg' })
-      const mskBlob = new Blob([procMaskBuf], { type: 'image/png' })
-
-      // Essaie les endpoints courants de lama-cleaner
-      let prediction = null
-      for (const ep of ['/inpaint', '/predict']) {
-        try {
-          prediction = await Promise.race([
-            client.predict(ep, { image: imgBlob, mask: mskBlob }),
-            new Promise((_, rej) => setTimeout(() => rej(new Error('predict timeout')), 60000)),
-          ])
-          break
-        } catch (e) {
-          console.warn(`[inpaint] endpoint ${ep} :`, e.message)
-        }
-      }
-      if (!prediction) throw new Error('aucun endpoint LaMa n\'a répondu')
-
-      const resultBuf = await parseLaMaResult(prediction?.data?.[0])
-      if (!resultBuf) throw new Error('format de réponse LaMa inconnu')
-
-      lamaB64 = 'data:image/jpeg;base64,' + resultBuf.toString('base64')
-      console.log('[inpaint] LaMa OK —', resultBuf.length, 'bytes')
-    } catch (hfErr) {
-      console.warn('[inpaint] LaMa indisponible, fallback local :', hfErr.message)
-    }
-
-    if (lamaB64) return res.json({ result: lamaB64 })
-
-    // ── Fallback : diffusion locale (rayon 15px, pondération inverse-distance) ─
+    // Load image pixels (RGB, no alpha)
     const { data: imgData } = await sharp(imageBuffer)
       .resize(procW, procH).removeAlpha().raw().toBuffer({ resolveWithObject: true })
 
+    // Decode canvas mask with jimp — handles PNG with alpha reliably
+    const maskRaw = Buffer.from(mask.replace(/^data:image\/[a-z]+;base64,/, ''), 'base64')
     const maskImg = await Jimp.read(maskRaw)
     maskImg.resize(procW, procH, Jimp.RESIZE_NEAREST_NEIGHBOR)
-    const maskPx = maskImg.bitmap.data
+    const maskPx = maskImg.bitmap.data  // RGBA bytes, 4 per pixel
     const masked = new Uint8Array(procW * procH)
     for (let i = 0; i < procW * procH; i++) {
+      // White brush strokes (R > 80) = zone à effacer
       masked[i] = maskPx[i * 4] > 80 ? 1 : 0
     }
 
+    // Dilate 2px to cover brush anti-aliased edges
     const dilated = dilateMask(masked, procW, procH, 2)
+
     const result = applyDiffusion(imgData, dilated, procW, procH, 6)
     const out = await sharp(result, { raw: { width: procW, height: procH, channels: 3 } })
       .jpeg({ quality: 92 }).toBuffer()
