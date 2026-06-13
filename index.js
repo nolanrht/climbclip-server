@@ -98,6 +98,7 @@ const GOOGLE_REDIRECT_URI = "https://climbclip-server.onrender.com/auth/google/c
 const FRONTEND_URL = process.env.FRONTEND_URL || "https://climbclip.vercel.app"
 
 const upload = multer({ dest: "/tmp/uploads/", limits: { fileSize: 2 * 1024 * 1024 * 1024 } })
+const uploadMem = multer({ storage: multer.memoryStorage(), limits: { fileSize: 50 * 1024 * 1024 } })
 const jobs = {}
 const sseClients = {}
 
@@ -1070,5 +1071,140 @@ Règles timestamps: start+duration<=${Math.round(totalDuration)}, durées 10-30s
     updateJob(jobId, { status:"error", progress:0, error:err.message, completedAt: Date.now() })
   }
 }
+
+// ── Retouch helpers ──────────────────────────────────────────────────────────
+
+function applyDiffusion(imgBuf, masked, width, height, passes = 30) {
+  const buf = Buffer.from(imgBuf)
+  const m = new Uint8Array(masked)
+  for (let pass = 0; pass < passes; pass++) {
+    const next = new Uint8Array(m)
+    let changed = false
+    for (let y = 0; y < height; y++) {
+      for (let x = 0; x < width; x++) {
+        const idx = y * width + x
+        if (!m[idx]) continue
+        let r = 0, g = 0, b = 0, cnt = 0
+        for (const [dx, dy] of [[-1,0],[1,0],[0,-1],[0,1],[-1,-1],[1,-1],[-1,1],[1,1]]) {
+          const nx = x + dx, ny = y + dy
+          if (nx < 0 || nx >= width || ny < 0 || ny >= height) continue
+          const ni = ny * width + nx
+          if (m[ni]) continue
+          r += buf[ni*3]; g += buf[ni*3+1]; b += buf[ni*3+2]; cnt++
+        }
+        if (cnt > 0) {
+          buf[idx*3] = Math.round(r/cnt)
+          buf[idx*3+1] = Math.round(g/cnt)
+          buf[idx*3+2] = Math.round(b/cnt)
+          next[idx] = 0; changed = true
+        }
+      }
+    }
+    for (let i = 0; i < m.length; i++) m[i] = next[i]
+    if (!changed) break
+  }
+  return buf
+}
+
+app.post('/retouch/inpaint', uploadLimiter, uploadMem.single('image'), async (req, res) => {
+  const { mask } = req.body
+  if (!req.file || !mask) return res.status(400).json({ error: 'Image ou masque manquant' })
+  try {
+    const imageBuffer = req.file.buffer
+    const meta = await sharp(imageBuffer).metadata()
+    const maxDim = 1500
+    const scale = Math.min(1, maxDim / Math.max(meta.width, meta.height))
+    const procW = Math.round(meta.width * scale), procH = Math.round(meta.height * scale)
+    const { data: imgData } = await sharp(imageBuffer).resize(procW, procH).removeAlpha().raw().toBuffer({ resolveWithObject: true })
+    const maskBuf = Buffer.from(mask.replace(/^data:image\/[a-z]+;base64,/, ''), 'base64')
+    const { data: maskData } = await sharp(maskBuf).resize(procW, procH).greyscale().raw().toBuffer({ resolveWithObject: true })
+    const masked = new Uint8Array(procW * procH)
+    for (let i = 0; i < procW * procH; i++) masked[i] = maskData[i] > 80 ? 1 : 0
+    const result = applyDiffusion(imgData, masked, procW, procH, 30)
+    const resultBuf = await sharp(result, { raw: { width: procW, height: procH, channels: 3 } }).jpeg({ quality: 92 }).toBuffer()
+    res.json({ result: 'data:image/jpeg;base64,' + resultBuf.toString('base64') })
+  } catch (err) {
+    console.error('[inpaint]', err)
+    res.status(500).json({ error: err.message })
+  }
+})
+
+app.post('/retouch/remove-watermark', uploadLimiter, uploadMem.single('image'), async (req, res) => {
+  if (!req.file) return res.status(400).json({ error: 'Image manquante' })
+  try {
+    const imageBuffer = req.file.buffer
+    const meta = await sharp(imageBuffer).metadata()
+    const maxDim = 1500
+    const scale = Math.min(1, maxDim / Math.max(meta.width, meta.height))
+    const procW = Math.round(meta.width * scale), procH = Math.round(meta.height * scale)
+    const { data: imgData } = await sharp(imageBuffer).resize(procW, procH).removeAlpha().raw().toBuffer({ resolveWithObject: true })
+
+    // Detect semi-transparent / near-white regions as watermark candidates
+    const { data: rawAlpha } = await sharp(imageBuffer).resize(procW, procH).ensureAlpha().raw().toBuffer({ resolveWithObject: true })
+    const masked = new Uint8Array(procW * procH)
+    for (let i = 0; i < procW * procH; i++) {
+      const a = rawAlpha[i * 4 + 3]
+      const r = rawAlpha[i * 4], g = rawAlpha[i * 4 + 1], b = rawAlpha[i * 4 + 2]
+      const brightness = (r + g + b) / 3
+      // Semi-transparent pixels or very bright near-white blobs
+      if (a < 200 || (brightness > 220 && a > 200 && Math.max(r,g,b) - Math.min(r,g,b) < 30)) {
+        masked[i] = 1
+      }
+    }
+
+    const result = applyDiffusion(imgData, masked, procW, procH, 40)
+    const resultBuf = await sharp(result, { raw: { width: procW, height: procH, channels: 3 } }).jpeg({ quality: 92 }).toBuffer()
+    res.json({ result: 'data:image/jpeg;base64,' + resultBuf.toString('base64') })
+  } catch (err) {
+    console.error('[remove-watermark]', err)
+    res.status(500).json({ error: err.message })
+  }
+})
+
+app.post('/retouch/remove-text', uploadLimiter, uploadMem.single('image'), async (req, res) => {
+  if (!req.file) return res.status(400).json({ error: 'Image manquante' })
+  try {
+    const imageBuffer = req.file.buffer
+    const meta = await sharp(imageBuffer).metadata()
+    const maxDim = 1500
+    const scale = Math.min(1, maxDim / Math.max(meta.width, meta.height))
+    const procW = Math.round(meta.width * scale), procH = Math.round(meta.height * scale)
+    const { data: imgData } = await sharp(imageBuffer).resize(procW, procH).removeAlpha().raw().toBuffer({ resolveWithObject: true })
+
+    // Detect high-contrast text-like regions: very dark or very bright pixels
+    // with high local contrast (edges), typical of rendered text on backgrounds
+    const { data: grayData } = await sharp(imageBuffer).resize(procW, procH).greyscale().raw().toBuffer({ resolveWithObject: true })
+    const masked = new Uint8Array(procW * procH)
+    for (let y = 1; y < procH - 1; y++) {
+      for (let x = 1; x < procW - 1; x++) {
+        const idx = y * procW + x
+        const v = grayData[idx]
+        // Check local contrast (Sobel-like)
+        const gx = Math.abs(grayData[idx+1] - grayData[idx-1])
+        const gy = Math.abs(grayData[(y+1)*procW+x] - grayData[(y-1)*procW+x])
+        const grad = gx + gy
+        // High contrast + near black or near white = likely text pixel
+        if (grad > 60 && (v < 50 || v > 210)) {
+          // Expand slightly to cover anti-aliased edges
+          for (let dy = -2; dy <= 2; dy++) {
+            for (let dx = -2; dx <= 2; dx++) {
+              const ny = y + dy, nx = x + dx
+              if (ny >= 0 && ny < procH && nx >= 0 && nx < procW) {
+                masked[ny * procW + nx] = 1
+              }
+            }
+          }
+        }
+      }
+    }
+
+    const result = applyDiffusion(imgData, masked, procW, procH, 40)
+    const resultBuf = await sharp(result, { raw: { width: procW, height: procH, channels: 3 } }).jpeg({ quality: 92 }).toBuffer()
+    res.json({ result: 'data:image/jpeg;base64,' + resultBuf.toString('base64') })
+  } catch (err) {
+    console.error('[remove-text]', err)
+    res.status(500).json({ error: err.message })
+  }
+})
 
 app.listen(PORT, () => console.log(`ClimbClip server running on port ${PORT}`))
