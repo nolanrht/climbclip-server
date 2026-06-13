@@ -1076,7 +1076,7 @@ Règles timestamps: start+duration<=${Math.round(totalDuration)}, durées 10-30s
 
 const Jimp = require('jimp')
 
-// ── Gommage — PatchMatch NNF top-3 + feathering + structure ──────────────────
+// ── Gommage — inpainting directionnel + PatchMatch NNF top-3 ─────────────────
 
 function bfsOrder(mask, w, h) {
   const order = [], inQ = new Uint8Array(w * h)
@@ -1143,7 +1143,7 @@ function patchSSD(px, qx, qy, sx, sy, w, h, HALF) {
 
 function med3(a, b, c) { return a < b ? (b < c ? b : (a < c ? c : a)) : (a < c ? a : (b < c ? c : b)) }
 
-// PatchMatch NNF avec top-3 matches — iters/2 globales puis iters/2 locales radius 50px
+// PatchMatch NNF top-3 : iters/2 iterations globales puis iters/2 locales radius 50px
 function computeNNF(px, origMask, w, h, HALF, iters) {
   const N = w * h
   const order = bfsOrder(origMask, w, h)
@@ -1169,7 +1169,7 @@ function computeNNF(px, origMask, w, h, HALF, iters) {
   }
 
   for (const idx of order) {
-    for (let t = 0; t < 20; t++) {
+    for (let t = 0; t < 15; t++) {
       upd(idx,
         HALF + Math.floor(Math.random() * (w - 2*HALF)),
         HALF + Math.floor(Math.random() * (h - 2*HALF)))
@@ -1204,7 +1204,6 @@ function computeNNF(px, origMask, w, h, HALF, iters) {
   return { n1X, n1Y, n2X, n2Y, n3X, n3Y, order }
 }
 
-// Applique le NNF top-3 avec mediane RGB (evite les outliers)
 function applyNNFMedian(px, w, n1X, n1Y, n2X, n2Y, n3X, n3Y, order) {
   for (const idx of order) {
     if (n1X[idx] < 0) continue
@@ -1219,7 +1218,7 @@ function applyNNFMedian(px, w, n1X, n1Y, n2X, n2Y, n3X, n3Y, order) {
   }
 }
 
-// Fond plat : couleur mediane des pixels non-masques dans les 15px du masque
+// Fond plat : couleur mediane des pixels non-masques dans les 15px autour du masque
 function flatFillMedian(px, origMask, w, h) {
   const dist = new Uint8Array(w*h).fill(255)
   const q = []
@@ -1246,8 +1245,98 @@ function flatFillMedian(px, origMask, w, h) {
   }
 }
 
-// Feathering : fondu progressif sur R px depuis le bord du masque
-// alpha=0 au bord (couleur voisine originale) -> alpha=1 au centre (rempli)
+// Detecte la direction principale du contenu autour du masque via gradients Sobel
+// Retourne la direction des isophotes (perpendiculaire au gradient moyen)
+function sobelDirection(px, origMask, w, h) {
+  let sgx = 0, sgy = 0, cnt = 0
+  for (let y = 1; y < h-1; y++) {
+    for (let x = 1; x < w-1; x++) {
+      const i = y*w+x; if (origMask[i]) continue
+      if (!((x > 0 && origMask[i-1]) || (x < w-1 && origMask[i+1]) ||
+            (y > 0 && origMask[i-w]) || (y < h-1 && origMask[i+w]))) continue
+      // Luminance des 8 voisins
+      const lum = (ii) => { const i4 = ii*4; return 0.299*px[i4] + 0.587*px[i4+1] + 0.114*px[i4+2] }
+      const tl = lum((y-1)*w+(x-1)), tc = lum((y-1)*w+x), tr = lum((y-1)*w+(x+1))
+      const ml = lum(y*w+(x-1)),                           mr = lum(y*w+(x+1))
+      const bl = lum((y+1)*w+(x-1)), bc = lum((y+1)*w+x), br = lum((y+1)*w+(x+1))
+      const gx = -tl + tr - 2*ml + 2*mr - bl + br
+      const gy = -tl - 2*tc - tr + bl + 2*bc + br
+      const mag = Math.sqrt(gx*gx + gy*gy)
+      if (mag < 8) continue
+      sgx += gx/mag; sgy += gy/mag; cnt++
+    }
+  }
+  if (!cnt) return { dx: 1, dy: 0 }
+  const mgx = sgx/cnt, mgy = sgy/cnt
+  // Direction isophote = perpendiculaire au gradient = (-gy, gx)
+  const iphx = -mgy, iphy = mgx
+  const m = Math.sqrt(iphx*iphx + iphy*iphy) || 1
+  const adx = Math.abs(iphx/m), ady = Math.abs(iphy/m)
+  if (adx > 0.8 && ady < 0.4) return { dx: iphx > 0 ? 1 : -1, dy: 0 }
+  if (ady > 0.8 && adx < 0.4) return { dx: 0, dy: iphy > 0 ? 1 : -1 }
+  return { dx: iphx > 0 ? 1 : -1, dy: iphy > 0 ? 1 : -1 }
+}
+
+// Inpainting directionnel : propage depuis l'exterieur du masque vers l'interieur
+// le long de la direction des isophotes
+function directionalInpaint(px, origMask, w, h, dx, dy) {
+  const workMask = new Uint8Array(origMask)
+  const bfsOrd = bfsOrder(origMask, w, h)
+  for (let pass = 0; pass < 3; pass++) {
+    let filled = 0
+    for (const idx of bfsOrd) {
+      if (!workMask[idx]) continue
+      const x = idx%w, y = (idx/w)|0
+      let bestDist = 999, bestSi = -1
+      // Cherche dans les deux sens de la direction
+      for (const [ddx, ddy] of [[dx, dy], [-dx, -dy]]) {
+        let sx = x+ddx, sy = y+ddy, d = 1
+        while (sx >= 0 && sy >= 0 && sx < w && sy < h && d <= 60) {
+          const si = sy*w+sx
+          if (!workMask[si]) { if (d < bestDist) { bestDist = d; bestSi = si }; break }
+          sx += ddx; sy += ddy; d++
+        }
+      }
+      if (bestSi >= 0) {
+        const i4 = idx*4, si4 = bestSi*4
+        px[i4]=px[si4]; px[i4+1]=px[si4+1]; px[i4+2]=px[si4+2]
+        workMask[idx] = 0; filled++
+      }
+    }
+    if (!filled) break
+  }
+}
+
+// Correction de couleur pixel par pixel : aligne la luminosite de chaque pixel rempli
+// sur la moyenne de ses voisins non-masques sur 3px
+function pixelColorCorrection(px, origMask, w, h) {
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      const i = y*w+x; if (!origMask[i]) continue
+      let sumL = 0, cnt = 0
+      for (let dy = -3; dy <= 3; dy++) {
+        for (let dx = -3; dx <= 3; dx++) {
+          const nx = x+dx, ny = y+dy
+          if (nx < 0 || ny < 0 || nx >= w || ny >= h) continue
+          const ni = ny*w+nx; if (origMask[ni]) continue
+          const n4 = ni*4
+          sumL += 0.299*px[n4] + 0.587*px[n4+1] + 0.114*px[n4+2]; cnt++
+        }
+      }
+      if (!cnt) continue
+      const avgL = sumL/cnt
+      const i4 = i*4
+      const myL = 0.299*px[i4] + 0.587*px[i4+1] + 0.114*px[i4+2]
+      const delta = avgL - myL
+      if (Math.abs(delta) < 1) continue
+      px[i4]   = Math.max(0, Math.min(255, Math.round(px[i4]   + delta)))
+      px[i4+1] = Math.max(0, Math.min(255, Math.round(px[i4+1] + delta)))
+      px[i4+2] = Math.max(0, Math.min(255, Math.round(px[i4+2] + delta)))
+    }
+  }
+}
+
+// Feathering 12px avec blending exponentiel : transition rapide au bord, plein rempli au centre
 function featherBlend(px, origMask, w, h, R) {
   const dist = new Uint8Array(w*h).fill(255)
   const q = []
@@ -1263,7 +1352,8 @@ function featherBlend(px, origMask, w, h, R) {
   const snap = Buffer.from(px)
   for (let i = 0; i < w*h; i++) {
     const d = dist[i]; if (!origMask[i] || d > R) continue
-    const alpha = d / R
+    // Blending exponentiel : 0 au bord -> 1 au centre du masque
+    const alpha = 1 - Math.exp(-5 * d / R)
     const x = i%w, y = (i/w)|0
     let r = 0, g = 0, b = 0, wt = 0
     for (let dy = -R; dy <= R; dy++) {
@@ -1283,7 +1373,6 @@ function featherBlend(px, origMask, w, h, R) {
   }
 }
 
-// Coherence de couleur : blende 30% de la moyenne des voisins non-masques (rayon 5px)
 function colorCoherence(px, origMask, w, h, R) {
   const snap = Buffer.from(px)
   for (let y = 0; y < h; y++) {
@@ -1335,7 +1424,6 @@ function matchLuminance(px, origMask, w, h) {
   }
 }
 
-// Detecte la structure du fond : flat (variance<20) / gradient / texture
 function detectStructure(px, origMask, w, h) {
   let r = 0, g = 0, b = 0, cnt = 0
   const rv = [], gv = [], bv = []
@@ -1371,11 +1459,11 @@ app.post("/retouch/inpaint", uploadLimiter, async (req, res) => {
     const img = await Jimp.read(imgBuf)
     const msk = await Jimp.read(mskBuf)
 
-    const origW = img.getWidth(), origH = img.getHeight()
-    const sc = Math.min(1, 500 / Math.max(origW, origH))
-    const W = Math.round(origW * sc), H = Math.round(origH * sc)
-    if (sc < 1) {
-      img.resize(W, H, Jimp.RESIZE_BICUBIC)
+    // Traitement a la resolution originale — aucun resize
+    const W = img.getWidth(), H = img.getHeight()
+
+    // Synchronise les dimensions du masque si necessaire
+    if (msk.getWidth() !== W || msk.getHeight() !== H) {
       msk.resize(W, H, Jimp.RESIZE_NEAREST_NEIGHBOR)
     }
 
@@ -1391,7 +1479,9 @@ app.post("/retouch/inpaint", uploadLimiter, async (req, res) => {
     if (struct === 'flat') {
       flatFillMedian(px, origMask, W, H)
     } else {
-      const QW = Math.max(4, Math.round(W/4)), QH = Math.max(4, Math.round(H/4))
+      // ── Init multi-echelle 1/4 resolution (plafonne a 150px) ───────────────
+      const QW = Math.max(4, Math.min(150, Math.round(W/4)))
+      const QH = Math.max(4, Math.min(150, Math.round(H/4)))
       const qPx  = new Uint8ClampedArray(QW * QH * 4)
       const qMsk = new Uint8Array(QW * QH)
       for (let dy = 0; dy < QH; dy++) {
@@ -1414,18 +1504,33 @@ app.post("/retouch/inpaint", uploadLimiter, async (req, res) => {
         }
       }
 
+      // ── Diffusion pleine resolution ─────────────────────────────────────────
       const wm = new Uint8Array(origMask)
-      diffuse(px, wm, W, H, struct === 'gradient' ? 12 : 3)
+      diffuse(px, wm, W, H, struct === 'gradient' ? 10 : 2)
 
-      const pmIters = struct === 'gradient' ? 3 : 10
-      const nnf = computeNNF(px, origMask, W, H, 4, pmIters)
+      // ── Inpainting directionnel via gradients Sobel ─────────────────────────
+      const dir = sobelDirection(px, origMask, W, H)
+      directionalInpaint(px, origMask, W, H, dir.dx, dir.dy)
+
+      // ── PatchMatch NNF top-3 (6 iters : 3 global + 3 local 50px) ───────────
+      const pmIters = struct === 'gradient' ? 2 : 6
+      const nnf = computeNNF(px, origMask, W, H, 3, pmIters)
       if (nnf) applyNNFMedian(px, W, nnf.n1X, nnf.n1Y, nnf.n2X, nnf.n2Y, nnf.n3X, nnf.n3Y, nnf.order)
     }
 
+    // ── Correction couleur pixel par pixel (luminosite sur 3px) ────────────
+    pixelColorCorrection(px, origMask, W, H)
+
+    // ── Coherence couleur (30%, 5px) ────────────────────────────────────────
     colorCoherence(px, origMask, W, H, 5)
-    featherBlend(px, origMask, W, H, 8)
+
+    // ── Feathering exponentiel 12px ─────────────────────────────────────────
+    featherBlend(px, origMask, W, H, 12)
+
+    // ── Ajustement luminosite/contraste global ──────────────────────────────
     matchLuminance(px, origMask, W, H)
 
+    // PNG lossless — aucune compression avec perte, qualite maximale
     img.quality(100)
     const result = await img.getBufferAsync(Jimp.MIME_PNG)
     res.json({ result: "data:image/png;base64," + result.toString("base64") })
@@ -1434,6 +1539,7 @@ app.post("/retouch/inpaint", uploadLimiter, async (req, res) => {
     res.status(500).json({ error: e.message })
   }
 })
+
 
 
 // ── Retrait filigrane ────────────────────────────────────────────────────────
