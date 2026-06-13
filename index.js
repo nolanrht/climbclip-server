@@ -1074,7 +1074,22 @@ Règles timestamps: start+duration<=${Math.round(totalDuration)}, durées 10-30s
 
 // ── Retouch helpers ──────────────────────────────────────────────────────────
 
-function applyDiffusion(imgBuf, masked, width, height, passes = 30) {
+const Jimp = require('jimp')
+
+// Radius-15 sample offsets pre-computed once (inverse-distance weighted)
+const DIFF_SAMPLES = (() => {
+  const R = 15, s = []
+  for (let dy = -R; dy <= R; dy++)
+    for (let dx = -R; dx <= R; dx++) {
+      const d = Math.sqrt(dx * dx + dy * dy)
+      if (d > 0 && d <= R) s.push([dx, dy, 1 / (1 + d)])
+    }
+  return s
+})()
+
+// Fill masked pixels via inverse-distance weighted average of non-masked
+// neighbors within 15px radius. Multiple passes fill interior regions.
+function applyDiffusion(imgBuf, masked, width, height, passes = 6) {
   const buf = Buffer.from(imgBuf)
   const m = new Uint8Array(masked)
   for (let pass = 0; pass < passes; pass++) {
@@ -1084,19 +1099,23 @@ function applyDiffusion(imgBuf, masked, width, height, passes = 30) {
       for (let x = 0; x < width; x++) {
         const idx = y * width + x
         if (!m[idx]) continue
-        let r = 0, g = 0, b = 0, cnt = 0
-        for (const [dx, dy] of [[-1,0],[1,0],[0,-1],[0,1],[-1,-1],[1,-1],[-1,1],[1,1]]) {
+        let r = 0, g = 0, b = 0, wt = 0
+        for (const [dx, dy, w] of DIFF_SAMPLES) {
           const nx = x + dx, ny = y + dy
           if (nx < 0 || nx >= width || ny < 0 || ny >= height) continue
           const ni = ny * width + nx
           if (m[ni]) continue
-          r += buf[ni*3]; g += buf[ni*3+1]; b += buf[ni*3+2]; cnt++
+          r += buf[ni * 3] * w
+          g += buf[ni * 3 + 1] * w
+          b += buf[ni * 3 + 2] * w
+          wt += w
         }
-        if (cnt > 0) {
-          buf[idx*3] = Math.round(r/cnt)
-          buf[idx*3+1] = Math.round(g/cnt)
-          buf[idx*3+2] = Math.round(b/cnt)
-          next[idx] = 0; changed = true
+        if (wt > 0) {
+          buf[idx * 3]     = Math.round(r / wt)
+          buf[idx * 3 + 1] = Math.round(g / wt)
+          buf[idx * 3 + 2] = Math.round(b / wt)
+          next[idx] = 0
+          changed = true
         }
       }
     }
@@ -1105,6 +1124,23 @@ function applyDiffusion(imgBuf, masked, width, height, passes = 30) {
   }
   return buf
 }
+
+// Box-dilation: expand binary mask by r pixels in every direction
+function dilateMask(m, width, height, r) {
+  const out = new Uint8Array(m)
+  for (let y = 0; y < height; y++)
+    for (let x = 0; x < width; x++) {
+      if (!m[y * width + x]) continue
+      for (let dy = -r; dy <= r; dy++)
+        for (let dx = -r; dx <= r; dx++) {
+          const nx = x + dx, ny = y + dy
+          if (nx >= 0 && nx < width && ny >= 0 && ny < height) out[ny * width + nx] = 1
+        }
+    }
+  return out
+}
+
+// ── Gommage (canvas mask → inpaint) ─────────────────────────────────────────
 
 app.post('/retouch/inpaint', uploadLimiter, uploadMem.single('image'), async (req, res) => {
   const { mask } = req.body
@@ -1115,19 +1151,36 @@ app.post('/retouch/inpaint', uploadLimiter, uploadMem.single('image'), async (re
     const maxDim = 1500
     const scale = Math.min(1, maxDim / Math.max(meta.width, meta.height))
     const procW = Math.round(meta.width * scale), procH = Math.round(meta.height * scale)
-    const { data: imgData } = await sharp(imageBuffer).resize(procW, procH).removeAlpha().raw().toBuffer({ resolveWithObject: true })
-    const maskBuf = Buffer.from(mask.replace(/^data:image\/[a-z]+;base64,/, ''), 'base64')
-    const { data: maskData } = await sharp(maskBuf).resize(procW, procH).greyscale().raw().toBuffer({ resolveWithObject: true })
+
+    // Load image pixels (RGB, no alpha)
+    const { data: imgData } = await sharp(imageBuffer)
+      .resize(procW, procH).removeAlpha().raw().toBuffer({ resolveWithObject: true })
+
+    // Decode canvas mask with jimp — handles PNG with alpha reliably
+    const maskRaw = Buffer.from(mask.replace(/^data:image\/[a-z]+;base64,/, ''), 'base64')
+    const maskImg = await Jimp.read(maskRaw)
+    maskImg.resize(procW, procH, Jimp.RESIZE_NEAREST_NEIGHBOR)
+    const maskPx = maskImg.bitmap.data  // RGBA bytes, 4 per pixel
     const masked = new Uint8Array(procW * procH)
-    for (let i = 0; i < procW * procH; i++) masked[i] = maskData[i] > 80 ? 1 : 0
-    const result = applyDiffusion(imgData, masked, procW, procH, 30)
-    const resultBuf = await sharp(result, { raw: { width: procW, height: procH, channels: 3 } }).jpeg({ quality: 92 }).toBuffer()
-    res.json({ result: 'data:image/jpeg;base64,' + resultBuf.toString('base64') })
+    for (let i = 0; i < procW * procH; i++) {
+      // White brush strokes (R > 80) = zone à effacer
+      masked[i] = maskPx[i * 4] > 80 ? 1 : 0
+    }
+
+    // Dilate 2px to cover brush anti-aliased edges
+    const dilated = dilateMask(masked, procW, procH, 2)
+
+    const result = applyDiffusion(imgData, dilated, procW, procH, 6)
+    const out = await sharp(result, { raw: { width: procW, height: procH, channels: 3 } })
+      .jpeg({ quality: 92 }).toBuffer()
+    res.json({ result: 'data:image/jpeg;base64,' + out.toString('base64') })
   } catch (err) {
     console.error('[inpaint]', err)
     res.status(500).json({ error: err.message })
   }
 })
+
+// ── Retrait filigrane ────────────────────────────────────────────────────────
 
 app.post('/retouch/remove-watermark', uploadLimiter, uploadMem.single('image'), async (req, res) => {
   if (!req.file) return res.status(400).json({ error: 'Image manquante' })
@@ -1137,29 +1190,47 @@ app.post('/retouch/remove-watermark', uploadLimiter, uploadMem.single('image'), 
     const maxDim = 1500
     const scale = Math.min(1, maxDim / Math.max(meta.width, meta.height))
     const procW = Math.round(meta.width * scale), procH = Math.round(meta.height * scale)
-    const { data: imgData } = await sharp(imageBuffer).resize(procW, procH).removeAlpha().raw().toBuffer({ resolveWithObject: true })
 
-    // Detect semi-transparent / near-white regions as watermark candidates
-    const { data: rawAlpha } = await sharp(imageBuffer).resize(procW, procH).ensureAlpha().raw().toBuffer({ resolveWithObject: true })
+    const { data: imgData } = await sharp(imageBuffer)
+      .resize(procW, procH).removeAlpha().raw().toBuffer({ resolveWithObject: true })
+    const { data: rgba } = await sharp(imageBuffer)
+      .resize(procW, procH).ensureAlpha().raw().toBuffer({ resolveWithObject: true })
+    const { data: gray } = await sharp(imageBuffer)
+      .resize(procW, procH).greyscale().raw().toBuffer({ resolveWithObject: true })
+    // Micro-blur (σ=3) as local background estimate: |pixel − blur| ≈ local texture
+    const { data: microBlur } = await sharp(imageBuffer)
+      .resize(procW, procH).greyscale().blur(3).raw().toBuffer({ resolveWithObject: true })
+
     const masked = new Uint8Array(procW * procH)
     for (let i = 0; i < procW * procH; i++) {
-      const a = rawAlpha[i * 4 + 3]
-      const r = rawAlpha[i * 4], g = rawAlpha[i * 4 + 1], b = rawAlpha[i * 4 + 2]
-      const brightness = (r + g + b) / 3
-      // Semi-transparent pixels or very bright near-white blobs
-      if (a < 200 || (brightness > 220 && a > 200 && Math.max(r,g,b) - Math.min(r,g,b) < 30)) {
-        masked[i] = 1
-      }
+      // 1. Semi-transparent pixel → filigrane PNG/transparent
+      if (rgba[i * 4 + 3] < 220) { masked[i] = 1; continue }
+
+      const v = gray[i]
+      // localFlat = pixel is smooth (no local texture = uniform region)
+      const localFlat = Math.abs(v - microBlur[i]) < 12
+
+      // 2. Uniform bright overlay (texte/logo blanc ou clair)
+      if (v > 210 && localFlat) { masked[i] = 1; continue }
+
+      // 3. Uniform dark overlay (texte/logo noir)
+      if (v < 35 && localFlat) { masked[i] = 1; continue }
     }
 
-    const result = applyDiffusion(imgData, masked, procW, procH, 40)
-    const resultBuf = await sharp(result, { raw: { width: procW, height: procH, channels: 3 } }).jpeg({ quality: 92 }).toBuffer()
-    res.json({ result: 'data:image/jpeg;base64,' + resultBuf.toString('base64') })
+    // Dilate 3px to bridge watermark outline gaps
+    const dilated = dilateMask(masked, procW, procH, 3)
+
+    const result = applyDiffusion(imgData, dilated, procW, procH, 6)
+    const out = await sharp(result, { raw: { width: procW, height: procH, channels: 3 } })
+      .jpeg({ quality: 92 }).toBuffer()
+    res.json({ result: 'data:image/jpeg;base64,' + out.toString('base64') })
   } catch (err) {
     console.error('[remove-watermark]', err)
     res.status(500).json({ error: err.message })
   }
 })
+
+// ── Retrait texte ────────────────────────────────────────────────────────────
 
 app.post('/retouch/remove-text', uploadLimiter, uploadMem.single('image'), async (req, res) => {
   if (!req.file) return res.status(400).json({ error: 'Image manquante' })
@@ -1169,38 +1240,64 @@ app.post('/retouch/remove-text', uploadLimiter, uploadMem.single('image'), async
     const maxDim = 1500
     const scale = Math.min(1, maxDim / Math.max(meta.width, meta.height))
     const procW = Math.round(meta.width * scale), procH = Math.round(meta.height * scale)
-    const { data: imgData } = await sharp(imageBuffer).resize(procW, procH).removeAlpha().raw().toBuffer({ resolveWithObject: true })
 
-    // Detect high-contrast text-like regions: very dark or very bright pixels
-    // with high local contrast (edges), typical of rendered text on backgrounds
-    const { data: grayData } = await sharp(imageBuffer).resize(procW, procH).greyscale().raw().toBuffer({ resolveWithObject: true })
-    const masked = new Uint8Array(procW * procH)
+    const { data: imgData } = await sharp(imageBuffer)
+      .resize(procW, procH).removeAlpha().raw().toBuffer({ resolveWithObject: true })
+    const { data: gray } = await sharp(imageBuffer)
+      .resize(procW, procH).greyscale().raw().toBuffer({ resolveWithObject: true })
+    // σ=2 blur for edge enhancement: |pixel − blur| = local edge strength
+    const { data: microBlur } = await sharp(imageBuffer)
+      .resize(procW, procH).greyscale().blur(2).raw().toBuffer({ resolveWithObject: true })
+
+    // Detect text pixels: Sobel gradient + brightness threshold + blur-difference
+    const edgeMap = new Uint8Array(procW * procH)
     for (let y = 1; y < procH - 1; y++) {
       for (let x = 1; x < procW - 1; x++) {
-        const idx = y * procW + x
-        const v = grayData[idx]
-        // Check local contrast (Sobel-like)
-        const gx = Math.abs(grayData[idx+1] - grayData[idx-1])
-        const gy = Math.abs(grayData[(y+1)*procW+x] - grayData[(y-1)*procW+x])
-        const grad = gx + gy
-        // High contrast + near black or near white = likely text pixel
-        if (grad > 60 && (v < 50 || v > 210)) {
-          // Expand slightly to cover anti-aliased edges
-          for (let dy = -2; dy <= 2; dy++) {
-            for (let dx = -2; dx <= 2; dx++) {
-              const ny = y + dy, nx = x + dx
-              if (ny >= 0 && ny < procH && nx >= 0 && nx < procW) {
-                masked[ny * procW + nx] = 1
-              }
-            }
-          }
-        }
+        const i = y * procW + x
+        const v = gray[i]
+        // Sobel X
+        const gx = -gray[(y-1)*procW+(x-1)] - 2*gray[y*procW+(x-1)] - gray[(y+1)*procW+(x-1)]
+                   +gray[(y-1)*procW+(x+1)] + 2*gray[y*procW+(x+1)] + gray[(y+1)*procW+(x+1)]
+        // Sobel Y
+        const gy = -gray[(y-1)*procW+(x-1)] - 2*gray[(y-1)*procW+x] - gray[(y-1)*procW+(x+1)]
+                   +gray[(y+1)*procW+(x-1)] + 2*gray[(y+1)*procW+x] + gray[(y+1)*procW+(x+1)]
+        const grad = Math.sqrt(gx * gx + gy * gy)
+        const edgeStrength = Math.abs(v - microBlur[i])
+        // Strong edge + dark or bright value = text outline
+        if ((grad > 60 || edgeStrength > 20) && (v < 80 || v > 175)) edgeMap[i] = 1
       }
     }
 
-    const result = applyDiffusion(imgData, masked, procW, procH, 40)
-    const resultBuf = await sharp(result, { raw: { width: procW, height: procH, channels: 3 } }).jpeg({ quality: 92 }).toBuffer()
-    res.json({ result: 'data:image/jpeg;base64,' + resultBuf.toString('base64') })
+    // Include very dark fill pixels (interior of dark text strokes)
+    for (let i = 0; i < procW * procH; i++) {
+      if (gray[i] < 40) edgeMap[i] = 1
+    }
+
+    // Dilate 4px to cover full stroke width + anti-aliasing
+    let finalMask = dilateMask(edgeMap, procW, procH, 4)
+
+    // Safety: if > 40% masked, tighten thresholds to avoid destroying the image
+    const maskedCount = finalMask.reduce((s, v) => s + v, 0)
+    if (maskedCount > procW * procH * 0.4) {
+      const strict = new Uint8Array(procW * procH)
+      for (let y = 1; y < procH - 1; y++) {
+        for (let x = 1; x < procW - 1; x++) {
+          const i = y * procW + x
+          const v = gray[i]
+          const gx = -gray[(y-1)*procW+(x-1)] - 2*gray[y*procW+(x-1)] - gray[(y+1)*procW+(x-1)]
+                     +gray[(y-1)*procW+(x+1)] + 2*gray[y*procW+(x+1)] + gray[(y+1)*procW+(x+1)]
+          const gy = -gray[(y-1)*procW+(x-1)] - 2*gray[(y-1)*procW+x] - gray[(y-1)*procW+(x+1)]
+                     +gray[(y+1)*procW+(x-1)] + 2*gray[(y+1)*procW+x] + gray[(y+1)*procW+(x+1)]
+          if (Math.sqrt(gx*gx + gy*gy) > 100 && (v < 50 || v > 200)) strict[i] = 1
+        }
+      }
+      finalMask = dilateMask(strict, procW, procH, 3)
+    }
+
+    const result = applyDiffusion(imgData, finalMask, procW, procH, 6)
+    const out = await sharp(result, { raw: { width: procW, height: procH, channels: 3 } })
+      .jpeg({ quality: 92 }).toBuffer()
+    res.json({ result: 'data:image/jpeg;base64,' + out.toString('base64') })
   } catch (err) {
     console.error('[remove-text]', err)
     res.status(500).json({ error: err.message })
