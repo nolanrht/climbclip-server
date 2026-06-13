@@ -1145,8 +1145,12 @@ function dilateMask(m, width, height, r) {
 // ── Gommage — JSON body, jimp pour image + masque, diffusion Gaussienne ──────
 
 app.post('/retouch/inpaint', uploadLimiter, async (req, res) => {
-  const { image, mask } = req.body
-  if (!image || !mask) return res.status(400).json({ error: 'image et mask requis (base64)' })
+  console.log('[inpaint] content-type:', req.headers['content-type'])
+  console.log('[inpaint] body keys:', req.body ? Object.keys(req.body) : 'no body')
+  console.log('[inpaint] image:', req.body?.image ? req.body.image.length + ' chars' : 'MISSING')
+  console.log('[inpaint] mask:', req.body?.mask ? req.body.mask.length + ' chars' : 'MISSING')
+  const { image, mask } = req.body || {}
+  if (!image || !mask) return res.status(400).json({ error: 'image ou masque manquant' })
   try {
     // 1. Charge image et masque avec jimp depuis les data-URL base64
     const imgBuf = Buffer.from(image.replace(/^data:image\/[a-z+]+;base64,/, ''), 'base64')
