@@ -1076,9 +1076,8 @@ Règles timestamps: start+duration<=${Math.round(totalDuration)}, durées 10-30s
 
 const Jimp = require('jimp')
 
-// ── Gommage — inpainting avancé : structure + PatchMatch NNF + cohérence ──────
+// ── Gommage — PatchMatch NNF top-3 + feathering + structure ──────────────────
 
-// BFS depuis la frontière du masque vers l'intérieur
 function bfsOrder(mask, w, h) {
   const order = [], inQ = new Uint8Array(w * h)
   for (let i = 0; i < w * h; i++) {
@@ -1099,7 +1098,6 @@ function bfsOrder(mask, w, h) {
   return order
 }
 
-// Diffusion pondérée par la distance inverse — initialise les pixels masqués
 function diffuse(px, mask, w, h, passes) {
   for (let p = 0; p < passes; p++) {
     const nm = new Uint8Array(mask)
@@ -1128,7 +1126,6 @@ function diffuse(px, mask, w, h, passes) {
   }
 }
 
-// SSD patch 9×9 — compare (qx,qy) vs (sx,sy), utilise les valeurs initialisées
 function patchSSD(px, qx, qy, sx, sy, w, h, HALF) {
   let ssd = 0, cnt = 0
   for (let dy = -HALF; dy <= HALF; dy++) {
@@ -1144,76 +1141,151 @@ function patchSSD(px, qx, qy, sx, sy, w, h, HALF) {
   return cnt > 0 ? ssd/cnt : 1e18
 }
 
-// PatchMatch NNF — propagation + recherche aléatoire décroissante
-// localRadius=0 → recherche globale, >0 → recherche locale autour du meilleur match courant
-function runPatchMatch(px, origMask, w, h, iters, HALF, localRadius) {
+function med3(a, b, c) { return a < b ? (b < c ? b : (a < c ? c : a)) : (a < c ? a : (b < c ? c : b)) }
+
+// PatchMatch NNF avec top-3 matches — iters/2 globales puis iters/2 locales radius 50px
+function computeNNF(px, origMask, w, h, HALF, iters) {
   const N = w * h
   const order = bfsOrder(origMask, w, h)
-  if (!order.length) return
+  if (!order.length) return null
 
-  const nnfX = new Int16Array(N).fill(-1)
-  const nnfY = new Int16Array(N).fill(-1)
-  const nnfE = new Float32Array(N).fill(1e18)
+  const n1X = new Int16Array(N).fill(-1), n1Y = new Int16Array(N).fill(-1), n1E = new Float32Array(N).fill(1e18)
+  const n2X = new Int16Array(N).fill(-1), n2Y = new Int16Array(N).fill(-1), n2E = new Float32Array(N).fill(1e18)
+  const n3X = new Int16Array(N).fill(-1), n3Y = new Int16Array(N).fill(-1), n3E = new Float32Array(N).fill(1e18)
 
-  // Initialisation : 20 candidats aléatoires parmi les pixels originaux
-  for (const idx of order) {
-    const qx = idx % w, qy = (idx / w) | 0
-    for (let t = 0; t < 20; t++) {
-      const sx = HALF + Math.floor(Math.random() * (w - 2*HALF))
-      const sy = HALF + Math.floor(Math.random() * (h - 2*HALF))
-      if (origMask[sy*w+sx]) continue
-      const e = patchSSD(px, qx, qy, sx, sy, w, h, HALF)
-      if (e < nnfE[idx]) { nnfE[idx] = e; nnfX[idx] = sx; nnfY[idx] = sy }
+  const upd = (idx, sx, sy) => {
+    if (sx < HALF || sy < HALF || sx >= w-HALF || sy >= h-HALF || origMask[sy*w+sx]) return
+    const e = patchSSD(px, idx%w, (idx/w)|0, sx, sy, w, h, HALF)
+    if (e < n1E[idx]) {
+      n3E[idx]=n2E[idx]; n3X[idx]=n2X[idx]; n3Y[idx]=n2Y[idx]
+      n2E[idx]=n1E[idx]; n2X[idx]=n1X[idx]; n2Y[idx]=n1Y[idx]
+      n1E[idx]=e; n1X[idx]=sx; n1Y[idx]=sy
+    } else if (e < n2E[idx]) {
+      n3E[idx]=n2E[idx]; n3X[idx]=n2X[idx]; n3Y[idx]=n2Y[idx]
+      n2E[idx]=e; n2X[idx]=sx; n2Y[idx]=sy
+    } else if (e < n3E[idx]) {
+      n3E[idx]=e; n3X[idx]=sx; n3Y[idx]=sy
     }
   }
 
+  for (const idx of order) {
+    for (let t = 0; t < 20; t++) {
+      upd(idx,
+        HALF + Math.floor(Math.random() * (w - 2*HALF)),
+        HALF + Math.floor(Math.random() * (h - 2*HALF)))
+    }
+  }
+
+  const half = Math.floor(iters / 2)
   for (let iter = 0; iter < iters; iter++) {
     const fwd = iter % 2 === 0
+    const maxR = iter < half ? Math.max(w, h) : 50
     const pixels = fwd ? order : order.slice().reverse()
     for (const idx of pixels) {
       if (!origMask[idx]) continue
       const qx = idx % w, qy = (idx / w) | 0
-
-      // Propagation : essaie le NNF du voisin décalé de la différence de position
-      const offs = fwd ? [-1, -w] : [1, w]
-      for (const off of offs) {
+      for (const off of (fwd ? [-1, -w] : [1, w])) {
         const ni = idx + off
-        if (ni < 0 || ni >= N || nnfX[ni] < 0) continue
-        const sx = nnfX[ni] + (qx - ni % w)
-        const sy = nnfY[ni] + (qy - ((ni / w) | 0))
-        if (sx < HALF || sy < HALF || sx >= w-HALF || sy >= h-HALF || origMask[sy*w+sx]) continue
-        const e = patchSSD(px, qx, qy, sx, sy, w, h, HALF)
-        if (e < nnfE[idx]) { nnfE[idx] = e; nnfX[idx] = sx; nnfY[idx] = sy }
+        if (ni < 0 || ni >= N || n1X[ni] < 0) continue
+        upd(idx, n1X[ni] + (qx - ni%w), n1Y[ni] + (qy - ((ni/w)|0)))
       }
-
-      // Recherche aléatoire à rayon décroissant (exponentiel)
-      const bx = nnfX[idx] >= 0 ? nnfX[idx] : qx
-      const by = nnfY[idx] >= 0 ? nnfY[idx] : qy
-      const maxR = localRadius > 0 ? localRadius : Math.max(w, h)
+      const bx = n1X[idx] >= 0 ? n1X[idx] : qx
+      const by = n1Y[idx] >= 0 ? n1Y[idx] : qy
       let r = maxR
       while (r >= 1) {
-        const sx = Math.max(HALF, Math.min(w-1-HALF, Math.round(bx + (Math.random()*2-1)*r)))
-        const sy = Math.max(HALF, Math.min(h-1-HALF, Math.round(by + (Math.random()*2-1)*r)))
-        if (!origMask[sy*w+sx]) {
-          const e = patchSSD(px, qx, qy, sx, sy, w, h, HALF)
-          if (e < nnfE[idx]) { nnfE[idx] = e; nnfX[idx] = sx; nnfY[idx] = sy }
-        }
+        upd(idx,
+          Math.max(HALF, Math.min(w-1-HALF, Math.round(bx + (Math.random()*2-1)*r))),
+          Math.max(HALF, Math.min(h-1-HALF, Math.round(by + (Math.random()*2-1)*r))))
         r = r >> 1
       }
     }
   }
 
-  // Applique le NNF : copie le pixel central du meilleur patch source
+  return { n1X, n1Y, n2X, n2Y, n3X, n3Y, order }
+}
+
+// Applique le NNF top-3 avec mediane RGB (evite les outliers)
+function applyNNFMedian(px, w, n1X, n1Y, n2X, n2Y, n3X, n3Y, order) {
   for (const idx of order) {
-    if (!origMask[idx] || nnfX[idx] < 0) continue
-    const i4 = idx*4, si4 = (nnfY[idx]*w+nnfX[idx])*4
-    px[i4] = px[si4]; px[i4+1] = px[si4+1]; px[i4+2] = px[si4+2]
+    if (n1X[idx] < 0) continue
+    const i4 = idx*4, s1 = (n1Y[idx]*w+n1X[idx])*4
+    if (n2X[idx] < 0 || n3X[idx] < 0) {
+      px[i4]=px[s1]; px[i4+1]=px[s1+1]; px[i4+2]=px[s1+2]; continue
+    }
+    const s2 = (n2Y[idx]*w+n2X[idx])*4, s3 = (n3Y[idx]*w+n3X[idx])*4
+    px[i4]   = med3(px[s1],   px[s2],   px[s3])
+    px[i4+1] = med3(px[s1+1], px[s2+1], px[s3+1])
+    px[i4+2] = med3(px[s1+2], px[s2+2], px[s3+2])
   }
 }
 
-// Cohérence de couleur : blende 30% de la moyenne des voisins non-masqués (rayon 5px)
+// Fond plat : couleur mediane des pixels non-masques dans les 15px du masque
+function flatFillMedian(px, origMask, w, h) {
+  const dist = new Uint8Array(w*h).fill(255)
+  const q = []
+  for (let i = 0; i < w*h; i++) if (origMask[i]) { dist[i] = 0; q.push(i) }
+  for (let qi = 0; qi < q.length; qi++) {
+    const i = q[qi], x = i%w, y = (i/w)|0, d = dist[i]+1
+    if (d > 15) continue
+    if (x > 0   && dist[i-1] > d) { dist[i-1] = d; q.push(i-1) }
+    if (x < w-1 && dist[i+1] > d) { dist[i+1] = d; q.push(i+1) }
+    if (y > 0   && dist[i-w] > d) { dist[i-w] = d; q.push(i-w) }
+    if (y < h-1 && dist[i+w] > d) { dist[i+w] = d; q.push(i+w) }
+  }
+  const rv = [], gv = [], bv = []
+  for (let i = 0; i < w*h; i++) {
+    if (origMask[i] || dist[i] > 15) continue
+    const i4 = i*4; rv.push(px[i4]); gv.push(px[i4+1]); bv.push(px[i4+2])
+  }
+  if (!rv.length) return
+  rv.sort((a,b)=>a-b); gv.sort((a,b)=>a-b); bv.sort((a,b)=>a-b)
+  const mid = (rv.length/2)|0, medR = rv[mid], medG = gv[mid], medB = bv[mid]
+  for (let i = 0; i < w*h; i++) {
+    if (!origMask[i]) continue
+    const i4 = i*4; px[i4]=medR; px[i4+1]=medG; px[i4+2]=medB
+  }
+}
+
+// Feathering : fondu progressif sur R px depuis le bord du masque
+// alpha=0 au bord (couleur voisine originale) -> alpha=1 au centre (rempli)
+function featherBlend(px, origMask, w, h, R) {
+  const dist = new Uint8Array(w*h).fill(255)
+  const q = []
+  for (let i = 0; i < w*h; i++) if (!origMask[i]) { dist[i] = 0; q.push(i) }
+  for (let qi = 0; qi < q.length; qi++) {
+    const i = q[qi], x = i%w, y = (i/w)|0, d = dist[i]+1
+    if (d > R) continue
+    if (x > 0   && dist[i-1] > d) { dist[i-1] = d; q.push(i-1) }
+    if (x < w-1 && dist[i+1] > d) { dist[i+1] = d; q.push(i+1) }
+    if (y > 0   && dist[i-w] > d) { dist[i-w] = d; q.push(i-w) }
+    if (y < h-1 && dist[i+w] > d) { dist[i+w] = d; q.push(i+w) }
+  }
+  const snap = Buffer.from(px)
+  for (let i = 0; i < w*h; i++) {
+    const d = dist[i]; if (!origMask[i] || d > R) continue
+    const alpha = d / R
+    const x = i%w, y = (i/w)|0
+    let r = 0, g = 0, b = 0, wt = 0
+    for (let dy = -R; dy <= R; dy++) {
+      for (let dx = -R; dx <= R; dx++) {
+        const nx = x+dx, ny = y+dy
+        if (nx < 0 || ny < 0 || nx >= w || ny >= h) continue
+        const ni = ny*w+nx; if (origMask[ni]) continue
+        const d2 = (dx*dx+dy*dy) || 1, n4 = ni*4
+        r += snap[n4]/d2; g += snap[n4+1]/d2; b += snap[n4+2]/d2; wt += 1/d2
+      }
+    }
+    if (!wt) continue
+    const i4 = i*4
+    px[i4]   = Math.round(px[i4]   * alpha + (r/wt) * (1-alpha))
+    px[i4+1] = Math.round(px[i4+1] * alpha + (g/wt) * (1-alpha))
+    px[i4+2] = Math.round(px[i4+2] * alpha + (b/wt) * (1-alpha))
+  }
+}
+
+// Coherence de couleur : blende 30% de la moyenne des voisins non-masques (rayon 5px)
 function colorCoherence(px, origMask, w, h, R) {
-  const snap = Buffer.from(px)  // snapshot avant modification
+  const snap = Buffer.from(px)
   for (let y = 0; y < h; y++) {
     for (let x = 0; x < w; x++) {
       const i = y*w+x; if (!origMask[i]) continue
@@ -1235,31 +1307,6 @@ function colorCoherence(px, origMask, w, h, R) {
   }
 }
 
-// Lissage Gaussien sigma=2 sur les pixels de bord du masque uniquement
-function featherEdges(px, origMask, w, h, R) {
-  const S2 = 2 * 2 * 2  // sigma=2
-  const snap = Buffer.from(px)
-  for (let y = 0; y < h; y++) {
-    for (let x = 0; x < w; x++) {
-      const i = y*w+x; if (!origMask[i]) continue
-      // Bord immédiat seulement (4-connexité)
-      if (!((x > 0 && !origMask[i-1]) || (x < w-1 && !origMask[i+1]) ||
-            (y > 0 && !origMask[i-w]) || (y < h-1 && !origMask[i+w]))) continue
-      let r = 0, g = 0, b = 0, wt = 0
-      for (let dy = -R; dy <= R; dy++) {
-        for (let dx = -R; dx <= R; dx++) {
-          const nx = x+dx, ny = y+dy
-          if (nx < 0 || ny < 0 || nx >= w || ny >= h) continue
-          const w_ = Math.exp(-(dx*dx+dy*dy)/S2), ni4 = (ny*w+nx)*4
-          r += snap[ni4]*w_; g += snap[ni4+1]*w_; b += snap[ni4+2]*w_; wt += w_
-        }
-      }
-      const i4 = i*4; px[i4] = r/wt; px[i4+1] = g/wt; px[i4+2] = b/wt
-    }
-  }
-}
-
-// Ajustement luminosité/contraste — aligne la zone remplie sur les voisins immédiats
 function matchLuminance(px, origMask, w, h) {
   let fR = 0, fG = 0, fB = 0, fN = 0, nR = 0, nG = 0, nB = 0, nN = 0
   for (let y = 0; y < h; y++) {
@@ -1288,33 +1335,30 @@ function matchLuminance(px, origMask, w, h) {
   }
 }
 
-// Détecte si la zone masquée est sur fond uni, dégradé ou texture
+// Detecte la structure du fond : flat (variance<20) / gradient / texture
 function detectStructure(px, origMask, w, h) {
   let r = 0, g = 0, b = 0, cnt = 0
-  const border = []
+  const rv = [], gv = [], bv = []
   for (let y = 0; y < h; y++) {
     for (let x = 0; x < w; x++) {
       const i = y*w+x; if (origMask[i]) continue
       if (!((x > 0 && origMask[i-1]) || (x < w-1 && origMask[i+1]) ||
             (y > 0 && origMask[i-w]) || (y < h-1 && origMask[i+w]))) continue
       const i4 = i*4
-      border.push(px[i4], px[i4+1], px[i4+2])
+      rv.push(px[i4]); gv.push(px[i4+1]); bv.push(px[i4+2])
       r += px[i4]; g += px[i4+1]; b += px[i4+2]; cnt++
     }
   }
-  if (!cnt) return { type: 'texture', meanR: 128, meanG: 128, meanB: 128 }
+  if (!cnt) return 'texture'
   const mr = r/cnt, mg = g/cnt, mb = b/cnt
   let v = 0
-  for (let i = 0; i < border.length; i += 3) {
-    const dr = border[i]-mr, dg = border[i+1]-mg, db = border[i+2]-mb
+  for (let i = 0; i < rv.length; i++) {
+    const dr = rv[i]-mr, dg = gv[i]-mg, db = bv[i]-mb
     v += dr*dr + dg*dg + db*db
   }
   v /= cnt
-  return { type: v < 400 ? 'flat' : v < 4000 ? 'gradient' : 'texture',
-           meanR: Math.round(mr), meanG: Math.round(mg), meanB: Math.round(mb) }
+  return v < 20 ? 'flat' : v < 4000 ? 'gradient' : 'texture'
 }
-
-// ── Endpoint ──────────────────────────────────────────────────────────────────
 
 app.post("/retouch/inpaint", uploadLimiter, async (req, res) => {
   try {
@@ -1327,7 +1371,6 @@ app.post("/retouch/inpaint", uploadLimiter, async (req, res) => {
     const img = await Jimp.read(imgBuf)
     const msk = await Jimp.read(mskBuf)
 
-    // Limite à 500px — compromis qualité/temps sur Render (0.1 vCPU)
     const origW = img.getWidth(), origH = img.getHeight()
     const sc = Math.min(1, 500 / Math.max(origW, origH))
     const W = Math.round(origW * sc), H = Math.round(origH * sc)
@@ -1336,82 +1379,62 @@ app.post("/retouch/inpaint", uploadLimiter, async (req, res) => {
       msk.resize(W, H, Jimp.RESIZE_NEAREST_NEIGHBOR)
     }
 
-    const px = img.bitmap.data   // Buffer RGBA direct, modifications visibles dans img
+    const px = img.bitmap.data
     const md = msk.bitmap.data
 
-    // Masque binaire 1D : 1 = pixel à reconstruire
     const maskArr  = new Uint8Array(W * H)
     for (let i = 0; i < W * H; i++) maskArr[i] = md[i*4] > 128 ? 1 : 0
     const origMask = new Uint8Array(maskArr)
 
-    // ── Détection de structure ────────────────────────────────────────────────
     const struct = detectStructure(px, origMask, W, H)
 
-    if (struct.type === 'flat') {
-      // Fond uni → rempli direct avec la couleur moyenne des bords
-      for (let i = 0; i < W*H; i++) {
-        if (!origMask[i]) continue
-        const i4 = i*4
-        px[i4] = struct.meanR; px[i4+1] = struct.meanG; px[i4+2] = struct.meanB
-      }
+    if (struct === 'flat') {
+      flatFillMedian(px, origMask, W, H)
     } else {
-      // ── Initialisation multi-échelle au 1/4 de résolution ──────────────────
-      // Capture les structures globales (dégradés, textures larges)
       const QW = Math.max(4, Math.round(W/4)), QH = Math.max(4, Math.round(H/4))
       const qPx  = new Uint8ClampedArray(QW * QH * 4)
       const qMsk = new Uint8Array(QW * QH)
       for (let dy = 0; dy < QH; dy++) {
         for (let dx = 0; dx < QW; dx++) {
-          const sx = Math.min(Math.round(dx * W/QW), W-1)
-          const sy = Math.min(Math.round(dy * H/QH), H-1)
-          const si = (sy*W+sx)*4, di = (dy*QW+dx)*4
+          const qsx = Math.min(Math.round(dx * W/QW), W-1)
+          const qsy = Math.min(Math.round(dy * H/QH), H-1)
+          const si = (qsy*W+qsx)*4, di = (dy*QW+dx)*4
           qPx[di] = px[si]; qPx[di+1] = px[si+1]; qPx[di+2] = px[si+2]; qPx[di+3] = 255
-          qMsk[dy*QW+dx] = origMask[sy*W+sx]
+          qMsk[dy*QW+dx] = origMask[qsy*W+qsx]
         }
       }
       diffuse(qPx, qMsk, QW, QH, 15)
       for (let y = 0; y < H; y++) {
         for (let x = 0; x < W; x++) {
           const i = y*W+x; if (!origMask[i]) continue
-          const sx = Math.min(Math.round(x * QW/W), QW-1)
-          const sy = Math.min(Math.round(y * QH/H), QH-1)
-          const si = (sy*QW+sx)*4, i4 = i*4
+          const qsx = Math.min(Math.round(x * QW/W), QW-1)
+          const qsy = Math.min(Math.round(y * QH/H), QH-1)
+          const si = (qsy*QW+qsx)*4, i4 = i*4
           px[i4] = qPx[si]; px[i4+1] = qPx[si+1]; px[i4+2] = qPx[si+2]
         }
       }
 
-      // ── Pass 1 : diffusion pleine résolution + PatchMatch grossier global ──
-      // Dégradé → diffusion longue suffit ; texture → diffusion courte + PM fort
-      const diffPasses = struct.type === 'gradient' ? 12 : 3
-      const wm1 = new Uint8Array(origMask)
-      diffuse(px, wm1, W, H, diffPasses)
+      const wm = new Uint8Array(origMask)
+      diffuse(px, wm, W, H, struct === 'gradient' ? 12 : 3)
 
-      // Pass 1 PatchMatch — recherche globale, patch 9×9, 5 itérations
-      const pmIters1 = struct.type === 'gradient' ? 2 : 5
-      runPatchMatch(px, origMask, W, H, pmIters1, 4, 0)
-
-      // ── Pass 2 : PatchMatch précis — recherche locale autour du meilleur ──
-      if (struct.type === 'texture') {
-        runPatchMatch(px, origMask, W, H, 5, 4, 20)
-      }
+      const pmIters = struct === 'gradient' ? 3 : 10
+      const nnf = computeNNF(px, origMask, W, H, 4, pmIters)
+      if (nnf) applyNNFMedian(px, W, nnf.n1X, nnf.n1Y, nnf.n2X, nnf.n2Y, nnf.n3X, nnf.n3Y, nnf.order)
     }
 
-    // ── Pass 3 : cohérence de couleur (30% voisins sur 5px) ─────────────────
     colorCoherence(px, origMask, W, H, 5)
-
-    // ── Pass 4 : lissage Gaussien σ=2 sur les pixels de bord ────────────────
-    featherEdges(px, origMask, W, H, 4)
-
-    // ── Pass 4 bis : ajustement luminosité/contraste ──────────────────────
+    featherBlend(px, origMask, W, H, 8)
     matchLuminance(px, origMask, W, H)
 
-    const result = await img.getBufferAsync(Jimp.MIME_JPEG)
-    res.json({ result: "data:image/jpeg;base64," + result.toString("base64") })
+    img.quality(100)
+    const result = await img.getBufferAsync(Jimp.MIME_PNG)
+    res.json({ result: "data:image/png;base64," + result.toString("base64") })
   } catch (e) {
     console.error('[inpaint]', e)
     res.status(500).json({ error: e.message })
   }
 })
+
 
 // ── Retrait filigrane ────────────────────────────────────────────────────────
 
