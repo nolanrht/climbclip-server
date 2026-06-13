@@ -1158,7 +1158,7 @@ app.post('/retouch/inpaint', uploadLimiter, async (req, res) => {
 
     // 2. Image → buffer RGB 3 canaux (sharp supprime l'alpha si présent)
     const { data: imgData } = await sharp(imgBuf)
-      .resize(procW, procH, { kernel: 'bicubic' })
+      .resize(procW, procH, { kernel: 'lanczos3' })
       .removeAlpha()
       .raw()
       .toBuffer({ resolveWithObject: true })
