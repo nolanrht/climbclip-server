@@ -1076,116 +1076,341 @@ Règles timestamps: start+duration<=${Math.round(totalDuration)}, durées 10-30s
 
 const Jimp = require('jimp')
 
-// Radius-20 sample offsets pre-computed once (Gaussian weighted, σ = R/3)
-const DIFF_SAMPLES = (() => {
-  const R = 20
-  const twoSigmaSq = 2 * (R / 3) * (R / 3)  // σ = R/3 → weight ≈ 0.011 at edge
-  const s = []
-  for (let dy = -R; dy <= R; dy++)
-    for (let dx = -R; dx <= R; dx++) {
-      const d = Math.sqrt(dx * dx + dy * dy)
-      if (d > 0 && d <= R) s.push([dx, dy, Math.exp(-d * d / twoSigmaSq)])
-    }
-  return s
-})()
+// ── Gommage — inpainting avancé : structure + PatchMatch NNF + cohérence ──────
 
-// Fill masked pixels via Gaussian-weighted average of non-masked neighbors
-// within 20px radius. 5 passes fill deeper interior regions iteratively.
-function applyDiffusion(imgBuf, masked, width, height, passes = 5) {
-  const buf = Buffer.from(imgBuf)
-  const m = new Uint8Array(masked)
-  for (let pass = 0; pass < passes; pass++) {
-    const next = new Uint8Array(m)
-    let changed = false
-    for (let y = 0; y < height; y++) {
-      for (let x = 0; x < width; x++) {
-        const idx = y * width + x
-        if (!m[idx]) continue
+// BFS depuis la frontière du masque vers l'intérieur
+function bfsOrder(mask, w, h) {
+  const order = [], inQ = new Uint8Array(w * h)
+  for (let i = 0; i < w * h; i++) {
+    if (!mask[i]) continue
+    const x = i % w, y = (i / w) | 0
+    if ((x > 0 && !mask[i-1]) || (x < w-1 && !mask[i+1]) ||
+        (y > 0 && !mask[i-w]) || (y < h-1 && !mask[i+w])) {
+      order.push(i); inQ[i] = 1
+    }
+  }
+  for (let qi = 0; qi < order.length; qi++) {
+    const i = order[qi], x = i % w, y = (i / w) | 0
+    if (x > 0   && mask[i-1] && !inQ[i-1]) { inQ[i-1] = 1; order.push(i-1) }
+    if (x < w-1 && mask[i+1] && !inQ[i+1]) { inQ[i+1] = 1; order.push(i+1) }
+    if (y > 0   && mask[i-w] && !inQ[i-w]) { inQ[i-w] = 1; order.push(i-w) }
+    if (y < h-1 && mask[i+w] && !inQ[i+w]) { inQ[i+w] = 1; order.push(i+w) }
+  }
+  return order
+}
+
+// Diffusion pondérée par la distance inverse — initialise les pixels masqués
+function diffuse(px, mask, w, h, passes) {
+  for (let p = 0; p < passes; p++) {
+    const nm = new Uint8Array(mask)
+    for (let y = 0; y < h; y++) {
+      for (let x = 0; x < w; x++) {
+        const i = y*w+x; if (!mask[i]) continue
         let r = 0, g = 0, b = 0, wt = 0
-        for (const [dx, dy, w] of DIFF_SAMPLES) {
-          const nx = x + dx, ny = y + dy
-          if (nx < 0 || nx >= width || ny < 0 || ny >= height) continue
-          const ni = ny * width + nx
-          if (m[ni]) continue
-          r += buf[ni * 3] * w
-          g += buf[ni * 3 + 1] * w
-          b += buf[ni * 3 + 2] * w
-          wt += w
+        for (let dy = -3; dy <= 3; dy++) {
+          for (let dx = -3; dx <= 3; dx++) {
+            const nx = x+dx, ny = y+dy
+            if (nx < 0 || ny < 0 || nx >= w || ny >= h) continue
+            const ni = ny*w+nx; if (mask[ni]) continue
+            const d2 = (dx*dx+dy*dy) || 1, i4 = ni*4
+            r += px[i4]/d2; g += px[i4+1]/d2; b += px[i4+2]/d2; wt += 1/d2
+          }
         }
         if (wt > 0) {
-          buf[idx * 3]     = Math.round(r / wt)
-          buf[idx * 3 + 1] = Math.round(g / wt)
-          buf[idx * 3 + 2] = Math.round(b / wt)
-          next[idx] = 0
-          changed = true
+          const i4 = i*4
+          px[i4] = r/wt; px[i4+1] = g/wt; px[i4+2] = b/wt; nm[i] = 0
         }
       }
     }
-    for (let i = 0; i < m.length; i++) m[i] = next[i]
-    if (!changed) break
+    let done = true
+    for (let i = 0; i < mask.length; i++) { mask[i] = nm[i]; if (nm[i]) done = false }
+    if (done) break
   }
-  return buf
 }
 
-// Box-dilation: expand binary mask by r pixels in every direction
-function dilateMask(m, width, height, r) {
-  const out = new Uint8Array(m)
-  for (let y = 0; y < height; y++)
-    for (let x = 0; x < width; x++) {
-      if (!m[y * width + x]) continue
-      for (let dy = -r; dy <= r; dy++)
-        for (let dx = -r; dx <= r; dx++) {
-          const nx = x + dx, ny = y + dy
-          if (nx >= 0 && nx < width && ny >= 0 && ny < height) out[ny * width + nx] = 1
-        }
+// SSD patch 9×9 — compare (qx,qy) vs (sx,sy), utilise les valeurs initialisées
+function patchSSD(px, qx, qy, sx, sy, w, h, HALF) {
+  let ssd = 0, cnt = 0
+  for (let dy = -HALF; dy <= HALF; dy++) {
+    for (let dx = -HALF; dx <= HALF; dx++) {
+      const ax = qx+dx, ay = qy+dy, bx = sx+dx, by = sy+dy
+      if (ax < 0 || ay < 0 || ax >= w || ay >= h) continue
+      if (bx < 0 || by < 0 || bx >= w || by >= h) continue
+      const ai = (ay*w+ax)*4, bi = (by*w+bx)*4
+      const dr = px[ai]-px[bi], dg = px[ai+1]-px[bi+1], db = px[ai+2]-px[bi+2]
+      ssd += dr*dr + dg*dg + db*db; cnt++
     }
-  return out
+  }
+  return cnt > 0 ? ssd/cnt : 1e18
 }
 
-// ── Gommage ──────────────────────────────────────────────────────────────────
+// PatchMatch NNF — propagation + recherche aléatoire décroissante
+// localRadius=0 → recherche globale, >0 → recherche locale autour du meilleur match courant
+function runPatchMatch(px, origMask, w, h, iters, HALF, localRadius) {
+  const N = w * h
+  const order = bfsOrder(origMask, w, h)
+  if (!order.length) return
+
+  const nnfX = new Int16Array(N).fill(-1)
+  const nnfY = new Int16Array(N).fill(-1)
+  const nnfE = new Float32Array(N).fill(1e18)
+
+  // Initialisation : 20 candidats aléatoires parmi les pixels originaux
+  for (const idx of order) {
+    const qx = idx % w, qy = (idx / w) | 0
+    for (let t = 0; t < 20; t++) {
+      const sx = HALF + Math.floor(Math.random() * (w - 2*HALF))
+      const sy = HALF + Math.floor(Math.random() * (h - 2*HALF))
+      if (origMask[sy*w+sx]) continue
+      const e = patchSSD(px, qx, qy, sx, sy, w, h, HALF)
+      if (e < nnfE[idx]) { nnfE[idx] = e; nnfX[idx] = sx; nnfY[idx] = sy }
+    }
+  }
+
+  for (let iter = 0; iter < iters; iter++) {
+    const fwd = iter % 2 === 0
+    const pixels = fwd ? order : order.slice().reverse()
+    for (const idx of pixels) {
+      if (!origMask[idx]) continue
+      const qx = idx % w, qy = (idx / w) | 0
+
+      // Propagation : essaie le NNF du voisin décalé de la différence de position
+      const offs = fwd ? [-1, -w] : [1, w]
+      for (const off of offs) {
+        const ni = idx + off
+        if (ni < 0 || ni >= N || nnfX[ni] < 0) continue
+        const sx = nnfX[ni] + (qx - ni % w)
+        const sy = nnfY[ni] + (qy - ((ni / w) | 0))
+        if (sx < HALF || sy < HALF || sx >= w-HALF || sy >= h-HALF || origMask[sy*w+sx]) continue
+        const e = patchSSD(px, qx, qy, sx, sy, w, h, HALF)
+        if (e < nnfE[idx]) { nnfE[idx] = e; nnfX[idx] = sx; nnfY[idx] = sy }
+      }
+
+      // Recherche aléatoire à rayon décroissant (exponentiel)
+      const bx = nnfX[idx] >= 0 ? nnfX[idx] : qx
+      const by = nnfY[idx] >= 0 ? nnfY[idx] : qy
+      const maxR = localRadius > 0 ? localRadius : Math.max(w, h)
+      let r = maxR
+      while (r >= 1) {
+        const sx = Math.max(HALF, Math.min(w-1-HALF, Math.round(bx + (Math.random()*2-1)*r)))
+        const sy = Math.max(HALF, Math.min(h-1-HALF, Math.round(by + (Math.random()*2-1)*r)))
+        if (!origMask[sy*w+sx]) {
+          const e = patchSSD(px, qx, qy, sx, sy, w, h, HALF)
+          if (e < nnfE[idx]) { nnfE[idx] = e; nnfX[idx] = sx; nnfY[idx] = sy }
+        }
+        r = r >> 1
+      }
+    }
+  }
+
+  // Applique le NNF : copie le pixel central du meilleur patch source
+  for (const idx of order) {
+    if (!origMask[idx] || nnfX[idx] < 0) continue
+    const i4 = idx*4, si4 = (nnfY[idx]*w+nnfX[idx])*4
+    px[i4] = px[si4]; px[i4+1] = px[si4+1]; px[i4+2] = px[si4+2]
+  }
+}
+
+// Cohérence de couleur : blende 30% de la moyenne des voisins non-masqués (rayon 5px)
+function colorCoherence(px, origMask, w, h, R) {
+  const snap = Buffer.from(px)  // snapshot avant modification
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      const i = y*w+x; if (!origMask[i]) continue
+      let r = 0, g = 0, b = 0, cnt = 0
+      for (let dy = -R; dy <= R; dy++) {
+        for (let dx = -R; dx <= R; dx++) {
+          const nx = x+dx, ny = y+dy
+          if (nx < 0 || ny < 0 || nx >= w || ny >= h) continue
+          const ni = ny*w+nx; if (origMask[ni]) continue
+          const n4 = ni*4; r += snap[n4]; g += snap[n4+1]; b += snap[n4+2]; cnt++
+        }
+      }
+      if (!cnt) continue
+      const i4 = i*4, f = 0.3
+      px[i4]   = Math.round(px[i4]   * (1-f) + (r/cnt) * f)
+      px[i4+1] = Math.round(px[i4+1] * (1-f) + (g/cnt) * f)
+      px[i4+2] = Math.round(px[i4+2] * (1-f) + (b/cnt) * f)
+    }
+  }
+}
+
+// Lissage Gaussien sigma=2 sur les pixels de bord du masque uniquement
+function featherEdges(px, origMask, w, h, R) {
+  const S2 = 2 * 2 * 2  // sigma=2
+  const snap = Buffer.from(px)
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      const i = y*w+x; if (!origMask[i]) continue
+      // Bord immédiat seulement (4-connexité)
+      if (!((x > 0 && !origMask[i-1]) || (x < w-1 && !origMask[i+1]) ||
+            (y > 0 && !origMask[i-w]) || (y < h-1 && !origMask[i+w]))) continue
+      let r = 0, g = 0, b = 0, wt = 0
+      for (let dy = -R; dy <= R; dy++) {
+        for (let dx = -R; dx <= R; dx++) {
+          const nx = x+dx, ny = y+dy
+          if (nx < 0 || ny < 0 || nx >= w || ny >= h) continue
+          const w_ = Math.exp(-(dx*dx+dy*dy)/S2), ni4 = (ny*w+nx)*4
+          r += snap[ni4]*w_; g += snap[ni4+1]*w_; b += snap[ni4+2]*w_; wt += w_
+        }
+      }
+      const i4 = i*4; px[i4] = r/wt; px[i4+1] = g/wt; px[i4+2] = b/wt
+    }
+  }
+}
+
+// Ajustement luminosité/contraste — aligne la zone remplie sur les voisins immédiats
+function matchLuminance(px, origMask, w, h) {
+  let fR = 0, fG = 0, fB = 0, fN = 0, nR = 0, nG = 0, nB = 0, nN = 0
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      const i = y*w+x, i4 = i*4
+      if (origMask[i]) {
+        fR += px[i4]; fG += px[i4+1]; fB += px[i4+2]; fN++
+      } else if (
+        (x > 0   && origMask[i-1]) || (x < w-1 && origMask[i+1]) ||
+        (y > 0   && origMask[i-w]) || (y < h-1 && origMask[i+w])
+      ) {
+        nR += px[i4]; nG += px[i4+1]; nB += px[i4+2]; nN++
+      }
+    }
+  }
+  if (!fN || !nN) return
+  const dR = (nR/nN - fR/fN) * 0.5
+  const dG = (nG/nN - fG/fN) * 0.5
+  const dB = (nB/nN - fB/fN) * 0.5
+  for (let i = 0; i < w*h; i++) {
+    if (!origMask[i]) continue
+    const i4 = i*4
+    px[i4]   = Math.max(0, Math.min(255, Math.round(px[i4]   + dR)))
+    px[i4+1] = Math.max(0, Math.min(255, Math.round(px[i4+1] + dG)))
+    px[i4+2] = Math.max(0, Math.min(255, Math.round(px[i4+2] + dB)))
+  }
+}
+
+// Détecte si la zone masquée est sur fond uni, dégradé ou texture
+function detectStructure(px, origMask, w, h) {
+  let r = 0, g = 0, b = 0, cnt = 0
+  const border = []
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      const i = y*w+x; if (origMask[i]) continue
+      if (!((x > 0 && origMask[i-1]) || (x < w-1 && origMask[i+1]) ||
+            (y > 0 && origMask[i-w]) || (y < h-1 && origMask[i+w]))) continue
+      const i4 = i*4
+      border.push(px[i4], px[i4+1], px[i4+2])
+      r += px[i4]; g += px[i4+1]; b += px[i4+2]; cnt++
+    }
+  }
+  if (!cnt) return { type: 'texture', meanR: 128, meanG: 128, meanB: 128 }
+  const mr = r/cnt, mg = g/cnt, mb = b/cnt
+  let v = 0
+  for (let i = 0; i < border.length; i += 3) {
+    const dr = border[i]-mr, dg = border[i+1]-mg, db = border[i+2]-mb
+    v += dr*dr + dg*dg + db*db
+  }
+  v /= cnt
+  return { type: v < 400 ? 'flat' : v < 4000 ? 'gradient' : 'texture',
+           meanR: Math.round(mr), meanG: Math.round(mg), meanB: Math.round(mb) }
+}
+
+// ── Endpoint ──────────────────────────────────────────────────────────────────
 
 app.post("/retouch/inpaint", uploadLimiter, async (req, res) => {
   try {
     const { image, mask } = req.body
     if (!image || !mask) return res.status(400).json({ error: "image ou masque manquant" })
 
-    const imgBuffer = Buffer.from(image.replace(/^data:image\/\w+;base64,/, ""), "base64")
-    const maskBuffer = Buffer.from(mask.replace(/^data:image\/\w+;base64,/, ""), "base64")
+    const imgBuf = Buffer.from(image.replace(/^data:image\/\w+;base64,/, ""), "base64")
+    const mskBuf = Buffer.from(mask.replace(/^data:image\/\w+;base64,/, ""), "base64")
 
-    const img = await Jimp.read(imgBuffer)
-    const msk = await Jimp.read(maskBuffer)
+    const img = await Jimp.read(imgBuf)
+    const msk = await Jimp.read(mskBuf)
 
-    const width = img.getWidth()
-    const height = img.getHeight()
-    const radius = 20
+    // Limite à 500px — compromis qualité/temps sur Render (0.1 vCPU)
+    const origW = img.getWidth(), origH = img.getHeight()
+    const sc = Math.min(1, 500 / Math.max(origW, origH))
+    const W = Math.round(origW * sc), H = Math.round(origH * sc)
+    if (sc < 1) {
+      img.resize(W, H, Jimp.RESIZE_BICUBIC)
+      msk.resize(W, H, Jimp.RESIZE_NEAREST_NEIGHBOR)
+    }
 
-    for (let pass = 0; pass < 5; pass++) {
-      for (let y = 0; y < height; y++) {
-        for (let x = 0; x < width; x++) {
-          const maskPixel = Jimp.intToRGBA(msk.getPixelColor(x, y))
-          if (maskPixel.r > 128) {
-            let r = 0, g = 0, b = 0, count = 0
-            for (let dy = -radius; dy <= radius; dy++) {
-              for (let dx = -radius; dx <= radius; dx++) {
-                const nx = x + dx, ny = y + dy
-                if (nx < 0 || ny < 0 || nx >= width || ny >= height) continue
-                const mp = Jimp.intToRGBA(msk.getPixelColor(nx, ny))
-                if (mp.r > 128) continue
-                const dist = Math.sqrt(dx * dx + dy * dy)
-                const w = Math.exp(-dist * dist / (2 * 100))
-                const p = Jimp.intToRGBA(img.getPixelColor(nx, ny))
-                r += p.r * w; g += p.g * w; b += p.b * w; count += w
-              }
-            }
-            if (count > 0) img.setPixelColor(Jimp.rgbaToInt(Math.round(r / count), Math.round(g / count), Math.round(b / count), 255), x, y)
-          }
+    const px = img.bitmap.data   // Buffer RGBA direct, modifications visibles dans img
+    const md = msk.bitmap.data
+
+    // Masque binaire 1D : 1 = pixel à reconstruire
+    const maskArr  = new Uint8Array(W * H)
+    for (let i = 0; i < W * H; i++) maskArr[i] = md[i*4] > 128 ? 1 : 0
+    const origMask = new Uint8Array(maskArr)
+
+    // ── Détection de structure ────────────────────────────────────────────────
+    const struct = detectStructure(px, origMask, W, H)
+
+    if (struct.type === 'flat') {
+      // Fond uni → rempli direct avec la couleur moyenne des bords
+      for (let i = 0; i < W*H; i++) {
+        if (!origMask[i]) continue
+        const i4 = i*4
+        px[i4] = struct.meanR; px[i4+1] = struct.meanG; px[i4+2] = struct.meanB
+      }
+    } else {
+      // ── Initialisation multi-échelle au 1/4 de résolution ──────────────────
+      // Capture les structures globales (dégradés, textures larges)
+      const QW = Math.max(4, Math.round(W/4)), QH = Math.max(4, Math.round(H/4))
+      const qPx  = new Uint8ClampedArray(QW * QH * 4)
+      const qMsk = new Uint8Array(QW * QH)
+      for (let dy = 0; dy < QH; dy++) {
+        for (let dx = 0; dx < QW; dx++) {
+          const sx = Math.min(Math.round(dx * W/QW), W-1)
+          const sy = Math.min(Math.round(dy * H/QH), H-1)
+          const si = (sy*W+sx)*4, di = (dy*QW+dx)*4
+          qPx[di] = px[si]; qPx[di+1] = px[si+1]; qPx[di+2] = px[si+2]; qPx[di+3] = 255
+          qMsk[dy*QW+dx] = origMask[sy*W+sx]
         }
+      }
+      diffuse(qPx, qMsk, QW, QH, 15)
+      for (let y = 0; y < H; y++) {
+        for (let x = 0; x < W; x++) {
+          const i = y*W+x; if (!origMask[i]) continue
+          const sx = Math.min(Math.round(x * QW/W), QW-1)
+          const sy = Math.min(Math.round(y * QH/H), QH-1)
+          const si = (sy*QW+sx)*4, i4 = i*4
+          px[i4] = qPx[si]; px[i4+1] = qPx[si+1]; px[i4+2] = qPx[si+2]
+        }
+      }
+
+      // ── Pass 1 : diffusion pleine résolution + PatchMatch grossier global ──
+      // Dégradé → diffusion longue suffit ; texture → diffusion courte + PM fort
+      const diffPasses = struct.type === 'gradient' ? 12 : 3
+      const wm1 = new Uint8Array(origMask)
+      diffuse(px, wm1, W, H, diffPasses)
+
+      // Pass 1 PatchMatch — recherche globale, patch 9×9, 5 itérations
+      const pmIters1 = struct.type === 'gradient' ? 2 : 5
+      runPatchMatch(px, origMask, W, H, pmIters1, 4, 0)
+
+      // ── Pass 2 : PatchMatch précis — recherche locale autour du meilleur ──
+      if (struct.type === 'texture') {
+        runPatchMatch(px, origMask, W, H, 5, 4, 20)
       }
     }
 
-    const resultBuffer = await img.getBufferAsync(Jimp.MIME_JPEG)
-    res.json({ result: "data:image/jpeg;base64," + resultBuffer.toString("base64") })
-  } catch (e) { res.status(500).json({ error: e.message }) }
+    // ── Pass 3 : cohérence de couleur (30% voisins sur 5px) ─────────────────
+    colorCoherence(px, origMask, W, H, 5)
+
+    // ── Pass 4 : lissage Gaussien σ=2 sur les pixels de bord ────────────────
+    featherEdges(px, origMask, W, H, 4)
+
+    // ── Pass 4 bis : ajustement luminosité/contraste ──────────────────────
+    matchLuminance(px, origMask, W, H)
+
+    const result = await img.getBufferAsync(Jimp.MIME_JPEG)
+    res.json({ result: "data:image/jpeg;base64," + result.toString("base64") })
+  } catch (e) {
+    console.error('[inpaint]', e)
+    res.status(500).json({ error: e.message })
+  }
 })
 
 // ── Retrait filigrane ────────────────────────────────────────────────────────
