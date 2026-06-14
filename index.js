@@ -1595,4 +1595,158 @@ app.post('/retouch/remove-text', uploadLimiter, uploadMem.single('image'), async
   }
 })
 
+// ─── DASHBOARD IMAGE GENERATION ─────────────────────────────────────────────
+const { createWorker: tessWorker } = require('tesseract.js')
+require('fs').mkdirSync('/tmp/tesseract-cache', { recursive: true })
+
+const DASH_ACCENT = {
+  OF: '#00aff0', Fanfix: '#a855f7', Fanvue: '#14b8a6', Reveal: '#f43f5e', Inflow: '#f97316'
+}
+
+function dashOrganic(total, n) {
+  const r = []
+  for (let i = 0; i < n; i++) {
+    const wd = i % 7, wb = wd >= 5 ? 1.4 : 1.0
+    const tr = 0.7 + 0.6 * i / n
+    r.push(wb * tr * (0.5 + Math.random()))
+  }
+  const s = r.reduce((a, b) => a + b, 0)
+  return r.map(v => v / s * total)
+}
+
+async function sampleColor(buf, x, y, w, h, W, H) {
+  try {
+    const left   = Math.max(0, Math.min(Math.round(x), W - 1))
+    const top    = Math.max(0, Math.min(Math.round(y), H - 1))
+    const width  = Math.max(1, Math.min(Math.round(w), W - left))
+    const height = Math.max(1, Math.min(Math.round(h), H - top))
+    const { channels } = await sharp(buf).extract({ left, top, width, height }).stats()
+    return { r: Math.round(channels[0].mean), g: Math.round(channels[1].mean), b: Math.round(channels[2].mean) }
+  } catch { return { r: 15, g: 15, b: 25 } }
+}
+
+function lum({ r, g, b }) { return 0.299 * r + 0.587 * g + 0.114 * b }
+
+function escXml(s) {
+  return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+}
+
+function fmtNewNum(newVal, origText) {
+  const hasK    = /k/i.test(origText)
+  const curr    = (origText.match(/[€$£]/) || [''])[0]
+  const hasDot  = /[,.]/.test(origText.replace(/[^,.\d]/g, ''))
+  if (hasK || newVal >= 10000) return `${curr}${(newVal / 1000).toFixed(1)}k`
+  if (hasDot) return `${curr}${newVal.toLocaleString('fr-FR')}`
+  return `${curr}${Math.round(newVal)}`
+}
+
+app.post('/dashboard/generate', uploadLimiter, uploadMem.single('image'), async (req, res) => {
+  let worker = null
+  try {
+    const file = req.file
+    if (!file) return res.status(400).json({ error: 'No image' })
+
+    const amount      = parseFloat(req.body.amount) || 0
+    const period      = req.body.period || '30d'
+    const templateKey = (req.body.template || 'OF').trim()
+    const accent      = DASH_ACCENT[templateKey] || '#00aff0'
+
+    let bars = 30
+    if (period === '24h') bars = 24
+    else if (period === '7d' || period === '1w') bars = 7
+    else if (period === 'custom' && req.body.startDate && req.body.endDate) {
+      const ms = new Date(req.body.endDate).getTime() - new Date(req.body.startDate).getTime()
+      bars = Math.min(Math.max(1, Math.ceil(ms / 86400000)), 60)
+    }
+
+    const buf  = file.buffer
+    const meta = await sharp(buf).metadata()
+    const W = meta.width, H = meta.height
+
+    // ── OCR ─────────────────────────────────────────────────────────────────
+    worker = await tessWorker('eng', 1, { cachePath: '/tmp/tesseract-cache', logger: () => {} })
+    const { data: ocrData } = await worker.recognize(buf)
+    await worker.terminate(); worker = null
+
+    const AMOUNT_RX = /^[€$£]?\d{1,9}([,.']\d{1,3})*[kKmM]?[€$£%]?$/
+    const DATE_RX   = /^\d{1,2}[\/\-.]\d{1,2}([\/\-.]\d{2,4})?$/
+
+    const amountWords = []
+    for (const w of (ocrData.words || [])) {
+      const txt = (w.text || '').trim()
+      if (w.confidence < 50 || !txt) continue
+      if ((w.bbox.x1 - w.bbox.x0) < 6 || (w.bbox.y1 - w.bbox.y0) < 6) continue
+      if (AMOUNT_RX.test(txt) || DATE_RX.test(txt)) amountWords.push(w)
+    }
+
+    // Largest-bbox word = main total; scale all others proportionally
+    const parsed = amountWords.map(w => {
+      const txt = w.text.trim()
+      const mul = /k/i.test(txt) ? 1000 : /m/i.test(txt) ? 1000000 : 1
+      const val = parseFloat(txt.replace(/[^0-9.]/g, '')) * mul
+      const area = (w.bbox.x1 - w.bbox.x0) * (w.bbox.y1 - w.bbox.y0)
+      return { w, val, area }
+    }).filter(p => p.val > 0).sort((a, b) => b.area - a.area)
+
+    const mainVal = parsed[0]?.val || 1
+    const scale   = amount / mainVal
+
+    const composites = []
+
+    // ── Erase & rewrite each detected number ────────────────────────────────
+    for (const { w: word, val } of parsed) {
+      const { x0, y0, x1, y1 } = word.bbox
+      const bw = x1 - x0, bh = y1 - y0
+      const bg = await sampleColor(buf, x0, y0, bw, bh, W, H)
+      const fg = lum(bg) > 128 ? '#0a0a0a' : '#ffffff'
+      const newText = escXml(fmtNewNum(Math.round(val * scale), word.text.trim()))
+      const pad = 3, svgW = bw + pad * 2 + 10, svgH = bh + pad * 2 + 4
+      const fs  = Math.max(9, Math.round(bh * 0.86))
+      composites.push({
+        input: Buffer.from(
+          `<svg width="${svgW}" height="${svgH}" xmlns="http://www.w3.org/2000/svg">` +
+          `<rect width="${svgW}" height="${svgH}" fill="rgb(${bg.r},${bg.g},${bg.b})"/>` +
+          `<text x="${pad + 1}" y="${bh + pad - 1}" font-family="Arial,Helvetica Neue,sans-serif" font-size="${fs}" font-weight="700" fill="${fg}">${newText}</text>` +
+          `</svg>`
+        ),
+        top: Math.max(0, y0 - pad), left: Math.max(0, x0 - pad), blend: 'over'
+      })
+    }
+
+    // ── Regenerate chart (bottom-35% heuristic) ──────────────────────────────
+    const cX = Math.round(W * 0.03), cY = Math.round(H * 0.60)
+    const cW = Math.round(W * 0.94), cH = Math.round(H * 0.34)
+    const chartBg = await sampleColor(buf, cX, cY, cW, Math.min(10, cH), W, H)
+
+    const cData = dashOrganic(amount, bars)
+    const maxV  = Math.max(...cData)
+    const bW    = (cW / bars) * 0.70
+    const bStep = cW / bars
+
+    let barsSvg = ''
+    cData.forEach((v, i) => {
+      const bH = Math.max(2, (v / maxV) * cH * 0.88)
+      barsSvg +=
+        `<rect x="${(i * bStep).toFixed(1)}" y="${(cH - bH).toFixed(1)}" ` +
+        `width="${bW.toFixed(1)}" height="${bH.toFixed(1)}" rx="3" fill="${accent}" opacity="0.88"/>`
+    })
+
+    composites.push({
+      input: Buffer.from(
+        `<svg width="${cW}" height="${cH}" xmlns="http://www.w3.org/2000/svg">` +
+        `<rect width="${cW}" height="${cH}" fill="rgb(${chartBg.r},${chartBg.g},${chartBg.b})"/>` +
+        barsSvg + `</svg>`
+      ),
+      top: cY, left: cX, blend: 'over'
+    })
+
+    const out = await sharp(buf).composite(composites).png().toBuffer()
+    res.json({ image: `data:image/png;base64,${out.toString('base64')}` })
+  } catch (err) {
+    if (worker) try { await worker.terminate() } catch (_) {}
+    console.error('[dashboard/generate]', err)
+    res.status(500).json({ error: err.message })
+  }
+})
+
 app.listen(PORT, () => console.log(`ClimbClip server running on port ${PORT}`))
