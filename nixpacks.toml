@@ -1,24 +1,2 @@
 [phases.setup]
-aptPkgs = [
-  "ffmpeg",
-  "libasound2",
-  "libatk-bridge2.0-0",
-  "libatk1.0-0",
-  "libcairo2",
-  "libcups2",
-  "libdrm2",
-  "libgbm1",
-  "libglib2.0-0",
-  "libnss3",
-  "libpango-1.0-0",
-  "libxcomposite1",
-  "libxdamage1",
-  "libxfixes3",
-  "libxkbcommon0",
-  "libxrandr2",
-  "fonts-liberation",
-  "libx11-6",
-  "libx11-xcb1",
-  "libxcb1",
-  "libxext6"
-]
+aptPkgs = ["ffmpeg", "fonts-liberation", "fonts-noto"]

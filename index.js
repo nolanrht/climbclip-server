@@ -1596,27 +1596,80 @@ app.post('/retouch/remove-text', uploadLimiter, uploadMem.single('image'), async
 })
 
 // ─── DASHBOARD IMAGE GENERATION ─────────────────────────────────────────────
-const puppeteer = require('puppeteer')
 
 const DASH_ACCENT = {
   OF: '#00aff0', Fanfix: '#a855f7', Fanvue: '#14b8a6', Reveal: '#f97316'
 }
 
-// Reuse a single browser instance across requests
-let _browser = null
-async function getBrowser() {
-  if (_browser) {
-    try { await _browser.version(); return _browser } catch (_) { _browser = null }
-  }
-  _browser = await puppeteer.launch({
-    headless: true,
-    args: [
-      '--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage',
-      '--disable-gpu', '--no-first-run', '--no-zygote', '--single-process',
-      '--disable-extensions', '--disable-background-networking',
-    ]
-  })
-  return _browser
+const DASH_CFG = {
+  OF: {
+    navBg:'#000', brand:'#00aff0', brandName:'OnlyFans',
+    bodyBg:'#ffffff', textColor:'#111',
+    balBorderC:'#f2f2f2', balLabelC:'#aaa', balMutedC:'#bbb',
+    dividerC:'#f2f2f2', badgeBg:'rgba(0,179,116,0.1)', badgeC:'#00b374',
+    statBg:'#fafafa', statBorderC:'#f0f0f0', deltaC:'#00b374', txnBorderC:'#f5f5f5',
+    pageTitle:'Statements',
+    navItems:[{t:'Accueil'},{t:'Messages'},{t:'Statements',active:true},{t:'Paramètres'}],
+    statTitle:'Top stats', txnTitle:'Dernières transactions',
+    txnTypes:['Abonnement','Pourboire','Message payant','Retrait'],
+    balLabel1:'Current balance', balSub1:'Available for payout',
+    balLabel2:'Pending balance', balSub2:'Clears in 3–7 days',
+    statL1:'Abonnés actifs', statL2:'Nouveaux abonnés',
+    statL3:'Taux renouvellement', statL4:'Transaction moy.',
+    statD3:'Période en cours', statD4:'Par abonné',
+    earnSub: (g, fmt) => `Net earnings  ·  gross: ${fmt(g)}`,
+  },
+  Fanfix: {
+    navBg:'#1a0535', brand:'#a855f7', brandName:'Fanfix',
+    bodyBg:'#fafafa', textColor:'#111',
+    balBorderC:'#ede0ff', balLabelC:'#c084fc', balMutedC:'#c084fc',
+    dividerC:'#f0e8ff', badgeBg:'rgba(168,85,247,0.12)', badgeC:'#a855f7',
+    statBg:'#fff', statBorderC:'#f0e8ff', deltaC:'#a855f7', txnBorderC:'#f5f0ff',
+    pageTitle:'Earnings Overview',
+    navItems:[{t:'Home'},{t:'Messages'},{t:'Earnings',active:true},{t:'Profile'}],
+    statTitle:'Analytics', txnTitle:'Transactions récentes',
+    txnTypes:['Abonnement mensuel','Pourboire','Contenu exclusif','Payout'],
+    balLabel1:'Current balance', balSub1:'Ready for withdrawal',
+    balLabel2:'Pending balance', balSub2:'In review',
+    statL1:'Supporters actifs', statL2:'Nouveaux supporters',
+    statL3:'Taux de rétention', statL4:'Revenu moyen',
+    statD3:'Période en cours', statD4:'Par supporter',
+    earnSub: (g, fmt) => `Net earnings  ·  gross: ${fmt(g)}`,
+  },
+  Fanvue: {
+    navBg:'#fff', brand:'#14b8a6', brandName:'Fanvue', navBorder:'#d0f0ec',
+    bodyBg:'#f5fffe', textColor:'#0d2926',
+    balBorderC:'#d0f0ec', balLabelC:'#14b8a6', balMutedC:'#a0d4cf',
+    dividerC:'#e0f7f4', badgeBg:'rgba(20,184,166,0.12)', badgeC:'#14b8a6',
+    statBg:'#fff', statBorderC:'#d0f0ec', deltaC:'#14b8a6', txnBorderC:'#e8f7f5',
+    pageTitle:'Earnings',
+    navItems:[{t:'Home'},{t:'Messages'},{t:'Earnings',active:true},{t:'Profile'}],
+    statTitle:'Performance', txnTitle:'Dernières transactions',
+    txnTypes:['Abonnement','Tip','Contenu PPV','Retrait'],
+    balLabel1:'Current balance', balSub1:'Available to withdraw',
+    balLabel2:'Pending balance', balSub2:'Processing',
+    statL1:'Fans actifs', statL2:'Nouveaux fans',
+    statL3:'Fidélisation', statL4:'Revenu / fan',
+    statD3:'Période en cours', statD4:'Moyenne mensuelle',
+    earnSub: (g, fmt) => `Net earnings  ·  gross: ${fmt(g)}`,
+  },
+  Reveal: {
+    navBg:'#1a0e00', brand:'#f97316', brandName:'Inflow',
+    bodyBg:'#fffaf5', textColor:'#1a0e00',
+    balBorderC:'#ffe8d4', balLabelC:'#f97316', balMutedC:'#fbb88e',
+    dividerC:'#ffe8d4', badgeBg:'rgba(249,115,22,0.12)', badgeC:'#f97316',
+    statBg:'#fff', statBorderC:'#ffe8d4', deltaC:'#f97316', txnBorderC:'#fff3eb',
+    pageTitle:'Revenus',
+    navItems:[{t:'Dashboard'},{t:'Conversions'},{t:'Revenus',active:true},{t:'Paramètres'}],
+    statTitle:'Indicateurs clés', txnTitle:'Transactions récentes',
+    txnTypes:['Vente directe','Abonnement','Commission','Payout'],
+    balLabel1:'Solde disponible', balSub1:'Prêt pour retrait',
+    balLabel2:'En attente', balSub2:'En traitement',
+    statL1:'Conversions actives', statL2:'Nouvelles conversions',
+    statL3:'Taux de conversion', statL4:'Panier moyen',
+    statD3:'Période en cours', statD4:'Par conversion',
+    earnSub: () => 'Montant brut total de la période',
+  },
 }
 
 // Seeded LCG — same gross always produces the same chart shape
@@ -1645,7 +1698,7 @@ function escXml(s) {
   return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
 }
 
-// Build SVG quadratic bezier midpoint path string from [{x,y}] points
+// Quadratic bezier midpoint path from [{x,y}] points
 function svgSmooth(pts) {
   let d = `M ${pts[0].x.toFixed(1)} ${pts[0].y.toFixed(1)}`
   for (let i = 0; i < pts.length - 1; i++) {
@@ -1656,58 +1709,166 @@ function svgSmooth(pts) {
   return d + ` L ${pts[pts.length - 1].x.toFixed(1)} ${pts[pts.length - 1].y.toFixed(1)}`
 }
 
-// Build main chart SVG (768×260)
-function buildChartSvg(cData, gross, accent, bars) {
-  const W = 768, H = 260, PL = 54, PR = 16, PT = 18, PB = 28
-  const PW = W - PL - PR, PH = H - PT - PB
-  let grid = ''
+// Build a full dashboard SVG — converted to PNG by sharp (no browser needed)
+function buildDashSvg(tpl, d) {
+  const c = DASH_CFG[tpl] || DASH_CFG.OF
+  const accent = d.accent
+  const W = 768, PAD = 24
+  const fmtUSD = v => '$' + v.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
+
+  const R = (x, y, w, h, fill, rx=0, stroke='none', sw=0) =>
+    `<rect x="${x}" y="${y}" width="${w}" height="${h}" fill="${fill}" rx="${rx}"` +
+    (stroke !== 'none' ? ` stroke="${stroke}" stroke-width="${sw}"` : '') + '/>'
+  const T = (x, y, s, { fs=14, fill='#111', fw='normal', anchor='start' }={}) =>
+    `<text x="${x}" y="${y}" font-family="Liberation Sans,Arial,sans-serif" font-size="${fs}" fill="${fill}" font-weight="${fw}" text-anchor="${anchor}">${escXml(String(s))}</text>`
+  const L = (x1, y1, x2, y2, stroke, sw=1) =>
+    `<line x1="${x1}" y1="${y1}" x2="${x2}" y2="${y2}" stroke="${stroke}" stroke-width="${sw}"/>`
+
+  let b = '', y = 0
+
+  // NAV
+  b += R(0, 0, W, 54, c.navBg)
+  if (c.navBorder) b += L(0, 53.5, W, 53.5, c.navBorder, 1.5)
+  b += T(PAD, 35, c.brandName, { fs:19, fill:c.brand, fw:'700' })
+  let nx = PAD + c.brandName.length * 11 + 32
+  c.navItems.forEach(item => {
+    const fill = item.active
+      ? (c.navBg === '#fff' ? c.brand : '#fff')
+      : (c.navBg === '#fff' ? '#999' : 'rgba(255,255,255,0.4)')
+    b += T(nx, 35, item.t, { fs:12, fill })
+    nx += item.t.length * 7.5 + 28
+  })
+  y = 54
+
+  // PAGE TITLE
+  y += 30
+  b += T(PAD, y + 22, c.pageTitle, { fs:22, fill:c.textColor, fw:'700' })
+  y += 52
+
+  // BALANCE ROW
+  const BAL_H = 108
+  b += R(PAD, y, W - PAD*2, BAL_H, '#fff', 14, c.balBorderC, 1.5)
+  const midX = PAD + (W - PAD*2) / 2
+  b += T(PAD+20, y+31, c.balLabel1, { fs:11, fill:c.balLabelC, fw:'600' })
+  b += T(PAD+20, y+73, d.curBal, { fs:32, fill:c.textColor, fw:'700' })
+  b += T(PAD+20, y+91, c.balSub1, { fs:11, fill:'#bbb' })
+  b += L(midX, y+16, midX, y+BAL_H-16, c.balBorderC, 1.5)
+  b += T(midX+20, y+31, c.balLabel2, { fs:11, fill:c.balLabelC, fw:'600' })
+  b += T(midX+20, y+66, d.pendBal, { fs:26, fill:c.balMutedC, fw:'700' })
+  b += T(midX+20, y+84, c.balSub2, { fs:11, fill:'#bbb' })
+  y += BAL_H + 22
+
+  // PERIOD
+  b += T(PAD, y+15, d.periodLabel, { fs:15, fill:c.textColor, fw:'700' })
+  y += 18
+  b += T(PAD, y+12, d.dateRange, { fs:12, fill:'#999' })
+  y += 34
+  b += L(PAD, y, W-PAD, y, c.dividerC, 1.5)
+  y += 22
+
+  // EARNINGS
+  const earnAmt = d.isInflow ? fmtUSD(d.gross) : fmtUSD(d.net)
+  b += T(PAD, y+28, earnAmt, { fs:28, fill:c.textColor, fw:'700' })
+  b += T(PAD, y+46, c.earnSub(d.gross, fmtUSD), { fs:12, fill:'#999' })
+  const badgeTxt = `+${d.growthPct}%`
+  const badgeW = badgeTxt.length * 9 + 20
+  b += R(W-PAD-badgeW, y+4, badgeW, 26, c.badgeBg, 13)
+  b += T(W-PAD-badgeW/2, y+21, badgeTxt, { fs:13, fill:c.badgeC, fw:'600', anchor:'middle' })
+  y += 64
+
+  // MAIN CHART
+  const CH = 260, PL = 54, PR = 16, PT = 18, PB = 28
+  const PW = W - PL - PR, PH = CH - PT - PB
+  const cy = y
+  b += R(0, cy, W, CH, '#fff')
   for (let i = 0; i <= 4; i++) {
-    const v  = gross * (1 - i / 4)
-    const yy = (PT + PH * i / 4).toFixed(1)
-    const lbl = v >= 1000 ? `$${Math.round(v / 1000)}k` : `$${Math.round(v)}`
-    grid += `<line x1="${PL}" y1="${yy}" x2="${W - PR}" y2="${yy}" stroke="#f0f0f0" stroke-width="1"/>`
-    grid += `<text x="${PL - 5}" y="${(+yy + 3.5).toFixed(1)}" font-family="Arial" font-size="10" fill="#ccc" text-anchor="end">${escXml(lbl)}</text>`
+    const v  = d.gross * (1 - i/4)
+    const gy = cy + PT + PH * i / 4
+    const lbl = v >= 1000 ? `$${Math.round(v/1000)}k` : `$${Math.round(v)}`
+    b += L(PL, gy, W-PR, gy, '#f0f0f0', 1)
+    b += T(PL-5, gy+4, lbl, { fs:10, fill:'#ccc', anchor:'end' })
   }
-  const pts = cData.map((v, i) => ({
-    x: PL + (bars > 1 ? i / (bars - 1) : 0) * PW,
-    y: PT + (1 - v / gross) * PH
+  const cPts = d.cData.map((v, i) => ({
+    x: PL + (d.bars > 1 ? i/(d.bars-1) : 0) * PW,
+    y: cy + PT + (1 - v/d.gross) * PH
   }))
-  const line = svgSmooth(pts)
-  const fill = line + ` L ${pts[pts.length-1].x.toFixed(1)} ${(PT+PH).toFixed(1)} L ${PL} ${(PT+PH).toFixed(1)} Z`
-  return (
-    `<svg width="${W}" height="${H}" xmlns="http://www.w3.org/2000/svg">` +
-    `<defs><linearGradient id="g1" x1="0" y1="0" x2="0" y2="1">` +
+  const cLine = svgSmooth(cPts)
+  const cFill = cLine + ` L ${cPts[cPts.length-1].x.toFixed(1)} ${(cy+PT+PH).toFixed(1)} L ${PL} ${(cy+PT+PH).toFixed(1)} Z`
+  b += `<defs><linearGradient id="grad${tpl}" x1="0" y1="0" x2="0" y2="1">` +
     `<stop offset="0%" stop-color="${accent}" stop-opacity="0.25"/>` +
     `<stop offset="100%" stop-color="${accent}" stop-opacity="0.02"/>` +
-    `</linearGradient></defs>` +
-    grid +
-    `<path d="${fill}" fill="url(#g1)"/>` +
-    `<path d="${line}" fill="none" stroke="${accent}" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>` +
-    `</svg>`
-  )
-}
+    `</linearGradient></defs>`
+  b += `<path d="${cFill}" fill="url(#grad${tpl})"/>`
+  b += `<path d="${cLine}" fill="none" stroke="${accent}" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>`
+  y = cy + CH
 
-// Build secondary chart SVG (768×72)
-function buildChart2Svg(cData2) {
-  const W = 768, H = 72, L = 8, R = 8, T = 6, B = 6
-  const PW = W - L - R, PH = H - T - B
-  const maxV = Math.max(...cData2)
-  const pts = cData2.map((v, i) => ({
-    x: L + (cData2.length > 1 ? i / (cData2.length - 1) : 0) * PW,
-    y: T + (1 - v / maxV) * PH
+  // SECONDARY CHART
+  const C2H = 72, C2L = 8, C2R = 8, C2T = 6, C2B = 6
+  const C2PW = W-C2L-C2R, C2PH = C2H-C2T-C2B
+  const maxV2 = Math.max(...d.cData2)
+  const c2y = y
+  b += R(0, c2y, W, C2H, '#fff')
+  const c2Pts = d.cData2.map((v, i) => ({
+    x: C2L + (d.bars > 1 ? i/(d.bars-1) : 0) * C2PW,
+    y: c2y + C2T + (1 - v/maxV2) * C2PH
   }))
-  const line = svgSmooth(pts)
-  const fill = line + ` L ${pts[pts.length-1].x.toFixed(1)} ${(T+PH).toFixed(1)} L ${L} ${(T+PH).toFixed(1)} Z`
-  return (
-    `<svg width="${W}" height="${H}" xmlns="http://www.w3.org/2000/svg">` +
-    `<path d="${fill}" fill="rgba(0,0,0,0.05)"/>` +
-    `<path d="${line}" fill="none" stroke="#ddd" stroke-width="1.5" stroke-linecap="round"/>` +
-    `</svg>`
-  )
+  const c2Line = svgSmooth(c2Pts)
+  const c2Fill = c2Line + ` L ${c2Pts[c2Pts.length-1].x.toFixed(1)} ${(c2y+C2T+C2PH).toFixed(1)} L ${C2L} ${(c2y+C2T+C2PH).toFixed(1)} Z`
+  b += `<path d="${c2Fill}" fill="rgba(0,0,0,0.05)"/>`
+  b += `<path d="${c2Line}" fill="none" stroke="#ddd" stroke-width="1.5" stroke-linecap="round"/>`
+  y = c2y + C2H
+
+  // DATE AXIS
+  b += R(0, y, W, 32, '#fff')
+  b += L(PAD, y+31, W-PAD, y+31, c.dividerC, 1.5)
+  d.dateLabels.forEach((lbl, i) => {
+    const lx = PL + (d.dateLabels.length > 1 ? i/(d.dateLabels.length-1) : 0) * PW
+    b += T(lx, y+18, lbl, { fs:10.5, fill:'#bbb', anchor:'middle' })
+  })
+  y += 32
+
+  // STATS
+  y += 28
+  b += T(PAD, y+13, c.statTitle, { fs:13, fill:c.textColor, fw:'700' })
+  y += 29
+  const statW = (W - PAD*2 - 14) / 2
+  const STAT_H = 82
+  const statRows = [
+    [c.statL1, d.statFans,        `↑ ${d.growthPct}% ce mois`],
+    [c.statL2, d.statNew,         `↑ ${d.statNewPct}% vs précédent`],
+    [c.statL3, `${d.statRenew}%`, c.statD3],
+    [c.statL4, d.statAvg,         c.statD4],
+  ]
+  statRows.forEach((row, i) => {
+    const col = i % 2, rowIdx = Math.floor(i/2)
+    const sx = PAD + col * (statW + 14)
+    const sy = y + rowIdx * (STAT_H + 14)
+    b += R(sx, sy, statW, STAT_H, c.statBg, 10, c.statBorderC, 1.5)
+    b += T(sx+16, sy+27, row[0], { fs:11, fill:'#999' })
+    b += T(sx+16, sy+55, String(row[1]), { fs:22, fill:c.textColor, fw:'700' })
+    b += T(sx+16, sy+71, row[2], { fs:11, fill:c.deltaC })
+  })
+  y += 2*(STAT_H+14) - 14 + 30
+
+  // TRANSACTIONS
+  b += T(PAD, y+13, c.txnTitle, { fs:13, fill:c.textColor, fw:'700' })
+  y += 27
+  c.txnTypes.forEach((type, i) => {
+    b += L(PAD, y, W-PAD, y, c.txnBorderC, 1)
+    b += T(PAD, y+16, type, { fs:13, fill:'#444' })
+    b += T(PAD, y+31, d.txnDates[i], { fs:11, fill:'#bbb' })
+    const isNeg = String(d.txnAmts[i]).startsWith('-')
+    b += T(W-PAD, y+22, d.txnAmts[i], { fs:14, fill:isNeg?'#f43f5e':c.textColor, fw:'600', anchor:'end' })
+    y += 42
+  })
+  y += 30
+
+  return `<svg width="${W}" height="${y}" xmlns="http://www.w3.org/2000/svg">` +
+    `<rect width="${W}" height="${y}" fill="${c.bodyBg}"/>` +
+    b + `</svg>`
 }
 
 app.post('/dashboard/generate', genericLimiter, async (req, res) => {
-  let page = null
   try {
     const { amount, period, template, startDate, endDate } = req.body
     const gross    = parseFloat(amount) || 0
@@ -1715,9 +1876,7 @@ app.post('/dashboard/generate', genericLimiter, async (req, res) => {
     const accent   = DASH_ACCENT[tpl] || '#00aff0'
     const isInflow = tpl === 'Reveal'
 
-    const tplPath = path.join(__dirname, 'templates', `${tpl}.html`)
-    if (!fs.existsSync(tplPath)) return res.status(404).json({ error: `Template introuvable: ${tpl}` })
-    let html = fs.readFileSync(tplPath, 'utf8')
+    if (!DASH_CFG[tpl]) return res.status(404).json({ error: `Template introuvable: ${tpl}` })
 
     // Period
     let bars = 30, pStart, pEnd
@@ -1732,26 +1891,24 @@ app.post('/dashboard/generate', genericLimiter, async (req, res) => {
     } else {
       pStart = new Date(now - 30 * 86400000); pEnd = now
     }
-    const fmtDate   = d => d.toLocaleDateString('fr-FR', { day: '2-digit', month: 'short', year: 'numeric' })
+    const fmtDate = dt => dt.toLocaleDateString('fr-FR', { day: '2-digit', month: 'short', year: 'numeric' })
     let fmtXLabel
-    if (period === '24h')             fmtXLabel = d => `${d.getHours()}h`
-    else if (period === '7d' || period === '1w') fmtXLabel = d => d.toLocaleDateString('fr-FR', { weekday: 'short' }).replace('.', '')
-    else                              fmtXLabel = d => d.toLocaleDateString('fr-FR', { day: 'numeric', month: 'short' })
+    if (period === '24h')             fmtXLabel = dt => `${dt.getHours()}h`
+    else if (period === '7d' || period === '1w') fmtXLabel = dt => dt.toLocaleDateString('fr-FR', { weekday: 'short' }).replace('.', '')
+    else                              fmtXLabel = dt => dt.toLocaleDateString('fr-FR', { day: 'numeric', month: 'short' })
 
-    // Financials — seeded so same gross = same output
-    const rng0      = seededRng(gross)
-    const net       = isInflow ? gross : gross * 0.80
-    const curBal    = gross * (0.06 + rng0() * 0.04)
-    const pendBal   = gross * (0.22 + rng0() * 0.08)
-    const growthPct = Math.floor(15 + rng0() * 30)
-    const statFans  = Math.floor(gross / (8 + rng0() * 12))
-    const statNew   = Math.floor(statFans * (0.08 + rng0() * 0.12))
-    const statRenew = Math.floor(72 + rng0() * 22)
+    const rng0       = seededRng(gross)
+    const net        = isInflow ? gross : gross * 0.80
+    const curBal     = gross * (0.06 + rng0() * 0.04)
+    const pendBal    = gross * (0.22 + rng0() * 0.08)
+    const growthPct  = Math.floor(15 + rng0() * 30)
+    const statFans   = Math.floor(gross / (8 + rng0() * 12))
+    const statNew    = Math.floor(statFans * (0.08 + rng0() * 0.12))
+    const statRenew  = Math.floor(72 + rng0() * 22)
     const statNewPct = Math.floor(8 + rng0() * 24)
-    const fmtUSD = v => '$' + v.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
-    const fmtShortUSD = v => '$' + (v >= 1000 ? (v/1000).toFixed(1)+'k' : v.toFixed(0))
+    const fmtUSD     = v => '$' + v.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
+    const fmtShort   = v => '$' + (v >= 1000 ? (v/1000).toFixed(1)+'k' : v.toFixed(0))
 
-    // Transactions (seeded fake entries)
     const txnDates = [1,3,5,7].map(d => {
       const dt = new Date(pEnd.getTime() - d * 86400000)
       return dt.toLocaleDateString('fr-FR', { day: '2-digit', month: 'short', year: 'numeric' })
@@ -1762,59 +1919,30 @@ app.post('/dashboard/generate', genericLimiter, async (req, res) => {
       fmtUSD(gross * (0.02 + rng0() * 0.03)),
       `-${fmtUSD(gross * (0.55 + rng0() * 0.15))}`,
     ]
-
-    // Date labels HTML (5 spans)
-    const dateLabelsHtml = Array.from({ length: 5 }, (_, i) => {
-      const t = i / 4
-      const d = new Date(pStart.getTime() + t * (pEnd.getTime() - pStart.getTime()))
-      return `<span>${fmtXLabel(d)}</span>`
-    }).join('')
-
+    const dateLabels = Array.from({ length: 5 }, (_, i) => {
+      const t  = i / 4
+      const dt = new Date(pStart.getTime() + t * (pEnd.getTime() - pStart.getTime()))
+      return fmtXLabel(dt)
+    })
     const periodLabel = period === '24h' ? '24 heures' : period === '7d' ? '7 jours' : period === '1w' ? '1 semaine' : '30 jours'
 
-    // Generate charts
     const cData  = dashOrganic(gross, bars, gross)
     const cData2 = dashOrganic(gross * 0.12, bars, gross + 1)
-    const chartSvg  = buildChartSvg(cData, gross, accent, bars)
-    const chartSvg2 = buildChart2Svg(cData2)
 
-    // Replace all placeholders
-    const replacements = {
-      '{{MONTANT_BRUT}}':    fmtUSD(gross),
-      '{{MONTANT_NET}}':     fmtUSD(net),
-      '{{CURRENT_BAL}}':     fmtUSD(curBal),
-      '{{PENDING_BAL}}':     fmtUSD(pendBal),
-      '{{PERIODE}}':         periodLabel,
-      '{{DATE_RANGE}}':      `${fmtDate(pStart)} – ${fmtDate(pEnd)}`,
-      '{{GROWTH_PCT}}':      String(growthPct),
-      '{{STAT_FANS}}':       String(statFans),
-      '{{STAT_NEW}}':        String(statNew),
-      '{{STAT_RENEW}}':      String(statRenew),
-      '{{STAT_NEW_PCT}}':    String(statNewPct),
-      '{{STAT_AVG}}':        fmtShortUSD(gross / Math.max(statFans, 1)),
-      '{{TXN_DATE1}}':       txnDates[0], '{{TXN_AMT1}}': txnAmts[0],
-      '{{TXN_DATE2}}':       txnDates[1], '{{TXN_AMT2}}': txnAmts[1],
-      '{{TXN_DATE3}}':       txnDates[2], '{{TXN_AMT3}}': txnAmts[2],
-      '{{TXN_DATE4}}':       txnDates[3], '{{TXN_AMT4}}': txnAmts[3],
-      '{{CHART_SVG}}':       chartSvg,
-      '{{CHART_SVG2}}':      chartSvg2,
-      '{{DATE_LABELS_HTML}}': dateLabelsHtml,
-    }
-    for (const [k, v] of Object.entries(replacements)) {
-      html = html.split(k).join(v)
-    }
+    const svgStr = buildDashSvg(tpl, {
+      accent, isInflow, gross, net,
+      curBal:  fmtUSD(curBal),
+      pendBal: fmtUSD(pendBal),
+      growthPct, statFans, statNew, statRenew, statNewPct,
+      statAvg: fmtShort(gross / Math.max(statFans, 1)),
+      txnDates, txnAmts, dateLabels, periodLabel,
+      dateRange: `${fmtDate(pStart)} – ${fmtDate(pEnd)}`,
+      cData, cData2, bars,
+    })
 
-    // Puppeteer screenshot
-    const browser = await getBrowser()
-    page = await browser.newPage()
-    await page.setViewport({ width: 768, height: 900 })
-    await page.setContent(html, { waitUntil: 'domcontentloaded', timeout: 15000 })
-    const screenshot = await page.screenshot({ type: 'png', fullPage: true })
-    await page.close(); page = null
-
-    res.json({ image: `data:image/png;base64,${screenshot.toString('base64')}` })
+    const pngBuf = await sharp(Buffer.from(svgStr)).png().toBuffer()
+    res.json({ image: `data:image/png;base64,${pngBuf.toString('base64')}` })
   } catch (err) {
-    if (page) try { await page.close() } catch (_) {}
     console.error('[dashboard/generate]', err)
     res.status(500).json({ error: err.message })
   }
