@@ -1596,9 +1596,27 @@ app.post('/retouch/remove-text', uploadLimiter, uploadMem.single('image'), async
 })
 
 // ─── DASHBOARD IMAGE GENERATION ─────────────────────────────────────────────
-// No native deps: sharp for compositing, SVG strings for all drawing
+const puppeteer = require('puppeteer')
+
 const DASH_ACCENT = {
   OF: '#00aff0', Fanfix: '#a855f7', Fanvue: '#14b8a6', Reveal: '#f97316'
+}
+
+// Reuse a single browser instance across requests
+let _browser = null
+async function getBrowser() {
+  if (_browser) {
+    try { await _browser.version(); return _browser } catch (_) { _browser = null }
+  }
+  _browser = await puppeteer.launch({
+    headless: true,
+    args: [
+      '--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage',
+      '--disable-gpu', '--no-first-run', '--no-zygote', '--single-process',
+      '--disable-extensions', '--disable-background-networking',
+    ]
+  })
+  return _browser
 }
 
 // Seeded LCG — same gross always produces the same chart shape
@@ -1627,13 +1645,6 @@ function escXml(s) {
   return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
 }
 
-// Estimate font size so text fits maxW (Arial number chars ≈ 0.58× size)
-function fitSvgSize(text, maxW, startSize) {
-  let s = startSize
-  while (s > 9 && text.length * s * 0.60 > maxW) s -= 2
-  return s
-}
-
 // Build SVG quadratic bezier midpoint path string from [{x,y}] points
 function svgSmooth(pts) {
   let d = `M ${pts[0].x.toFixed(1)} ${pts[0].y.toFixed(1)}`
@@ -1645,18 +1656,68 @@ function svgSmooth(pts) {
   return d + ` L ${pts[pts.length - 1].x.toFixed(1)} ${pts[pts.length - 1].y.toFixed(1)}`
 }
 
+// Build main chart SVG (768×260)
+function buildChartSvg(cData, gross, accent, bars) {
+  const W = 768, H = 260, PL = 54, PR = 16, PT = 18, PB = 28
+  const PW = W - PL - PR, PH = H - PT - PB
+  let grid = ''
+  for (let i = 0; i <= 4; i++) {
+    const v  = gross * (1 - i / 4)
+    const yy = (PT + PH * i / 4).toFixed(1)
+    const lbl = v >= 1000 ? `$${Math.round(v / 1000)}k` : `$${Math.round(v)}`
+    grid += `<line x1="${PL}" y1="${yy}" x2="${W - PR}" y2="${yy}" stroke="#f0f0f0" stroke-width="1"/>`
+    grid += `<text x="${PL - 5}" y="${(+yy + 3.5).toFixed(1)}" font-family="Arial" font-size="10" fill="#ccc" text-anchor="end">${escXml(lbl)}</text>`
+  }
+  const pts = cData.map((v, i) => ({
+    x: PL + (bars > 1 ? i / (bars - 1) : 0) * PW,
+    y: PT + (1 - v / gross) * PH
+  }))
+  const line = svgSmooth(pts)
+  const fill = line + ` L ${pts[pts.length-1].x.toFixed(1)} ${(PT+PH).toFixed(1)} L ${PL} ${(PT+PH).toFixed(1)} Z`
+  return (
+    `<svg width="${W}" height="${H}" xmlns="http://www.w3.org/2000/svg">` +
+    `<defs><linearGradient id="g1" x1="0" y1="0" x2="0" y2="1">` +
+    `<stop offset="0%" stop-color="${accent}" stop-opacity="0.25"/>` +
+    `<stop offset="100%" stop-color="${accent}" stop-opacity="0.02"/>` +
+    `</linearGradient></defs>` +
+    grid +
+    `<path d="${fill}" fill="url(#g1)"/>` +
+    `<path d="${line}" fill="none" stroke="${accent}" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>` +
+    `</svg>`
+  )
+}
+
+// Build secondary chart SVG (768×72)
+function buildChart2Svg(cData2) {
+  const W = 768, H = 72, L = 8, R = 8, T = 6, B = 6
+  const PW = W - L - R, PH = H - T - B
+  const maxV = Math.max(...cData2)
+  const pts = cData2.map((v, i) => ({
+    x: L + (cData2.length > 1 ? i / (cData2.length - 1) : 0) * PW,
+    y: T + (1 - v / maxV) * PH
+  }))
+  const line = svgSmooth(pts)
+  const fill = line + ` L ${pts[pts.length-1].x.toFixed(1)} ${(T+PH).toFixed(1)} L ${L} ${(T+PH).toFixed(1)} Z`
+  return (
+    `<svg width="${W}" height="${H}" xmlns="http://www.w3.org/2000/svg">` +
+    `<path d="${fill}" fill="rgba(0,0,0,0.05)"/>` +
+    `<path d="${line}" fill="none" stroke="#ddd" stroke-width="1.5" stroke-linecap="round"/>` +
+    `</svg>`
+  )
+}
+
 app.post('/dashboard/generate', genericLimiter, async (req, res) => {
+  let page = null
   try {
     const { amount, period, template, startDate, endDate } = req.body
     const gross    = parseFloat(amount) || 0
     const tpl      = (template || 'OF').trim()
     const accent   = DASH_ACCENT[tpl] || '#00aff0'
-    const isInflow = tpl === 'Reveal' // Reveal key = Inflow display (no fee deduction)
+    const isInflow = tpl === 'Reveal'
 
-    // Fetch template from Vercel (Next.js serves /public at root)
-    const imgFetch = await fetch(`https://climbclip.vercel.app/templates/${tpl}.png`)
-    if (!imgFetch.ok) return res.status(404).json({ error: `Template introuvable: ${tpl}` })
-    const buf = Buffer.from(await imgFetch.arrayBuffer())
+    const tplPath = path.join(__dirname, 'templates', `${tpl}.html`)
+    if (!fs.existsSync(tplPath)) return res.status(404).json({ error: `Template introuvable: ${tpl}` })
+    let html = fs.readFileSync(tplPath, 'utf8')
 
     // Period
     let bars = 30, pStart, pEnd
@@ -1671,150 +1732,89 @@ app.post('/dashboard/generate', genericLimiter, async (req, res) => {
     } else {
       pStart = new Date(now - 30 * 86400000); pEnd = now
     }
-    const fmtDate = d => d.toLocaleDateString('fr-FR', { day: '2-digit', month: 'short', year: 'numeric' })
+    const fmtDate   = d => d.toLocaleDateString('fr-FR', { day: '2-digit', month: 'short', year: 'numeric' })
     let fmtXLabel
-    if (period === '24h') {
-      fmtXLabel = d => `${d.getHours()}h`
-    } else if (period === '7d' || period === '1w') {
-      fmtXLabel = d => d.toLocaleDateString('fr-FR', { weekday: 'short' }).replace('.', '')
-    } else {
-      fmtXLabel = d => d.toLocaleDateString('fr-FR', { day: 'numeric', month: 'short' })
-    }
+    if (period === '24h')             fmtXLabel = d => `${d.getHours()}h`
+    else if (period === '7d' || period === '1w') fmtXLabel = d => d.toLocaleDateString('fr-FR', { weekday: 'short' }).replace('.', '')
+    else                              fmtXLabel = d => d.toLocaleDateString('fr-FR', { day: 'numeric', month: 'short' })
 
-    // Financials — seeded so same input = same output
+    // Financials — seeded so same gross = same output
     const rng0      = seededRng(gross)
     const net       = isInflow ? gross : gross * 0.80
     const curBal    = gross * (0.06 + rng0() * 0.04)
     const pendBal   = gross * (0.22 + rng0() * 0.08)
     const growthPct = Math.floor(15 + rng0() * 30)
-    const fmtUSD    = v => '$' + v.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
+    const statFans  = Math.floor(gross / (8 + rng0() * 12))
+    const statNew   = Math.floor(statFans * (0.08 + rng0() * 0.12))
+    const statRenew = Math.floor(72 + rng0() * 22)
+    const statNewPct = Math.floor(8 + rng0() * 24)
+    const fmtUSD = v => '$' + v.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
+    const fmtShortUSD = v => '$' + (v >= 1000 ? (v/1000).toFixed(1)+'k' : v.toFixed(0))
 
-    // Each zone becomes a sharp composite: SVG over white rect
-    const composites = []
-    function zone(left, top, w, h, svgBody) {
-      composites.push({
-        input: Buffer.from(
-          `<svg width="${w}" height="${h}" xmlns="http://www.w3.org/2000/svg">` +
-          `<rect width="${w}" height="${h}" fill="#ffffff"/>` +
-          svgBody + `</svg>`
-        ),
-        left, top
-      })
-    }
+    // Transactions (seeded fake entries)
+    const txnDates = [1,3,5,7].map(d => {
+      const dt = new Date(pEnd.getTime() - d * 86400000)
+      return dt.toLocaleDateString('fr-FR', { day: '2-digit', month: 'short', year: 'numeric' })
+    })
+    const txnAmts = [
+      fmtUSD(gross * (0.03 + rng0() * 0.04)),
+      fmtUSD(gross * (0.01 + rng0() * 0.02)),
+      fmtUSD(gross * (0.02 + rng0() * 0.03)),
+      `-${fmtUSD(gross * (0.55 + rng0() * 0.15))}`,
+    ]
 
-    // ── Zone 1: Current balance ──────────────────────────────────────────────
-    const curBalStr = fmtUSD(curBal)
-    const fs1 = fitSvgSize(curBalStr, 288, 48)
-    zone(35, 183, 310, 90,
-      `<text x="0" y="${fs1}" font-family="Arial" font-size="${fs1}" font-weight="700" fill="#000">${escXml(curBalStr)}</text>` +
-      `<text x="0" y="${fs1 + 22}" font-family="Arial" font-size="13" fill="#888">Current balance</text>`
-    )
+    // Date labels HTML (5 spans)
+    const dateLabelsHtml = Array.from({ length: 5 }, (_, i) => {
+      const t = i / 4
+      const d = new Date(pStart.getTime() + t * (pEnd.getTime() - pStart.getTime()))
+      return `<span>${fmtXLabel(d)}</span>`
+    }).join('')
 
-    // ── Zone 2: Pending balance ──────────────────────────────────────────────
-    const pendBalStr = fmtUSD(pendBal)
-    const fs2 = fitSvgSize(pendBalStr, 318, 36)
-    zone(393, 183, 342, 90,
-      `<text x="0" y="${fs2}" font-family="Arial" font-size="${fs2}" font-weight="700" fill="#888">${escXml(pendBalStr)}</text>` +
-      `<text x="0" y="${fs2 + 22}" font-family="Arial" font-size="13" fill="#aaa">Pending balance</text>`
-    )
-
-    // ── Zone 3: Period label ─────────────────────────────────────────────────
     const periodLabel = period === '24h' ? '24 heures' : period === '7d' ? '7 jours' : period === '1w' ? '1 semaine' : '30 jours'
-    zone(35, 500, 240, 50,
-      `<text x="0" y="30" font-family="Arial" font-size="18" font-weight="700" fill="#000">${escXml(periodLabel)}</text>`
-    )
 
-    // ── Zone 4: Date range ───────────────────────────────────────────────────
-    zone(35, 538, 700, 38,
-      `<text x="0" y="24" font-family="Arial" font-size="13" fill="#666">${escXml(fmtDate(pStart))} – ${escXml(fmtDate(pEnd))}</text>`
-    )
-
-    // ── Zone 5: Earnings ─────────────────────────────────────────────────────
-    if (isInflow) {
-      const fs5 = fitSvgSize(fmtUSD(gross), 420, 28)
-      zone(35, 643, 730, 75,
-        `<text x="0" y="${fs5}" font-family="Arial" font-size="${fs5}" font-weight="700" fill="#000">${escXml(fmtUSD(gross))}</text>` +
-        `<text x="0" y="${fs5 + 22}" font-family="Arial" font-size="13" fill="#888">Montant brut</text>`
-      )
-    } else {
-      const fs5 = fitSvgSize(fmtUSD(net), 320, 28)
-      const subLine = `Net earnings  ·  gross: ${fmtUSD(gross)}`
-      zone(35, 643, 730, 75,
-        `<text x="0" y="${fs5}" font-family="Arial" font-size="${fs5}" font-weight="700" fill="#000">${escXml(fmtUSD(net))}</text>` +
-        `<text x="0" y="${fs5 + 22}" font-family="Arial" font-size="13" fill="#888">${escXml(subLine)}</text>` +
-        `<rect x="430" y="${fs5 - 16}" width="80" height="24" rx="12" fill="#00b37418"/>` +
-        `<text x="470" y="${fs5 + 3}" font-family="Arial" font-size="13" font-weight="600" fill="#00b374" text-anchor="middle">+${growthPct}%</text>`
-      )
-    }
-
-    // ── Zone 6: Main chart (768×290) ─────────────────────────────────────────
-    const cData = dashOrganic(gross, bars, gross)
-    const CW = 768, CH = 290
-    const PL = 58, PR = 16, PT = 22, PB = 38
-    const PW = CW - PL - PR, PH = CH - PT - PB
-
-    // Grid + Y-axis labels
-    let gridSvg = ''
-    for (let i = 0; i <= 4; i++) {
-      const v   = gross * (1 - i / 4)
-      const yy  = (PT + PH * i / 4).toFixed(1)
-      const lbl = v >= 1000 ? `$${Math.round(v / 1000)}k` : `$${Math.round(v)}`
-      gridSvg += `<line x1="${PL}" y1="${yy}" x2="${CW - PR}" y2="${yy}" stroke="#eeeeee" stroke-width="1"/>`
-      gridSvg += `<text x="${PL - 5}" y="${(+yy + 4).toFixed(1)}" font-family="Arial" font-size="10" fill="#bbb" text-anchor="end">${escXml(lbl)}</text>`
-    }
-
-    // Chart points (relative to the SVG, which starts at y=714 on the image)
-    const pts = cData.map((v, i) => ({
-      x: PL + (bars > 1 ? i / (bars - 1) : 0) * PW,
-      y: PT + (1 - v / gross) * PH
-    }))
-    const linePath = svgSmooth(pts)
-    const fillPath = linePath +
-      ` L ${pts[pts.length - 1].x.toFixed(1)} ${(PT + PH).toFixed(1)}` +
-      ` L ${PL} ${(PT + PH).toFixed(1)} Z`
-
-    zone(0, 714, CW, CH,
-      `<defs><linearGradient id="cg" x1="0" y1="0" x2="0" y2="1">` +
-      `<stop offset="0%" stop-color="${accent}" stop-opacity="0.28"/>` +
-      `<stop offset="100%" stop-color="${accent}" stop-opacity="0.02"/>` +
-      `</linearGradient></defs>` +
-      gridSvg +
-      `<path d="${fillPath}" fill="url(#cg)"/>` +
-      `<path d="${linePath}" fill="none" stroke="${accent}" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>`
-    )
-
-    // ── Zone 7: Secondary chart (768×100) ────────────────────────────────────
+    // Generate charts
+    const cData  = dashOrganic(gross, bars, gross)
     const cData2 = dashOrganic(gross * 0.12, bars, gross + 1)
-    const maxV2  = Math.max(...cData2)
-    const C2PL = 10, C2PR = 10, C2PT = 8, C2PB = 8
-    const C2PW = CW - C2PL - C2PR, C2PH = 100 - C2PT - C2PB
-    const pts2 = cData2.map((v, i) => ({
-      x: C2PL + (bars > 1 ? i / (bars - 1) : 0) * C2PW,
-      y: C2PT + (1 - v / maxV2) * C2PH
-    }))
-    const line2 = svgSmooth(pts2)
-    const fill2 = line2 +
-      ` L ${pts2[pts2.length - 1].x.toFixed(1)} ${(C2PT + C2PH).toFixed(1)}` +
-      ` L ${C2PL} ${(C2PT + C2PH).toFixed(1)} Z`
+    const chartSvg  = buildChartSvg(cData, gross, accent, bars)
+    const chartSvg2 = buildChart2Svg(cData2)
 
-    zone(0, 1007, CW, 100,
-      `<path d="${fill2}" fill="rgba(136,136,136,0.08)"/>` +
-      `<path d="${line2}" fill="none" stroke="#ccc" stroke-width="1.5" stroke-linecap="round"/>`
-    )
-
-    // ── Zone 8: Date labels (768×65) ─────────────────────────────────────────
-    let dateSvg = ''
-    for (let i = 0; i < 5; i++) {
-      const t  = i / 4
-      const d  = new Date(pStart.getTime() + t * (pEnd.getTime() - pStart.getTime()))
-      const lx = (PL + t * PW).toFixed(1)
-      dateSvg += `<text x="${lx}" y="30" font-family="Arial" font-size="11" fill="#aaa" text-anchor="middle">${escXml(fmtXLabel(d))}</text>`
+    // Replace all placeholders
+    const replacements = {
+      '{{MONTANT_BRUT}}':    fmtUSD(gross),
+      '{{MONTANT_NET}}':     fmtUSD(net),
+      '{{CURRENT_BAL}}':     fmtUSD(curBal),
+      '{{PENDING_BAL}}':     fmtUSD(pendBal),
+      '{{PERIODE}}':         periodLabel,
+      '{{DATE_RANGE}}':      `${fmtDate(pStart)} – ${fmtDate(pEnd)}`,
+      '{{GROWTH_PCT}}':      String(growthPct),
+      '{{STAT_FANS}}':       String(statFans),
+      '{{STAT_NEW}}':        String(statNew),
+      '{{STAT_RENEW}}':      String(statRenew),
+      '{{STAT_NEW_PCT}}':    String(statNewPct),
+      '{{STAT_AVG}}':        fmtShortUSD(gross / Math.max(statFans, 1)),
+      '{{TXN_DATE1}}':       txnDates[0], '{{TXN_AMT1}}': txnAmts[0],
+      '{{TXN_DATE2}}':       txnDates[1], '{{TXN_AMT2}}': txnAmts[1],
+      '{{TXN_DATE3}}':       txnDates[2], '{{TXN_AMT3}}': txnAmts[2],
+      '{{TXN_DATE4}}':       txnDates[3], '{{TXN_AMT4}}': txnAmts[3],
+      '{{CHART_SVG}}':       chartSvg,
+      '{{CHART_SVG2}}':      chartSvg2,
+      '{{DATE_LABELS_HTML}}': dateLabelsHtml,
     }
-    zone(0, 1106, CW, 65, dateSvg)
+    for (const [k, v] of Object.entries(replacements)) {
+      html = html.split(k).join(v)
+    }
 
-    const out = await sharp(buf).composite(composites).png().toBuffer()
-    res.json({ image: `data:image/png;base64,${out.toString('base64')}` })
+    // Puppeteer screenshot
+    const browser = await getBrowser()
+    page = await browser.newPage()
+    await page.setViewport({ width: 768, height: 900 })
+    await page.setContent(html, { waitUntil: 'domcontentloaded', timeout: 15000 })
+    const screenshot = await page.screenshot({ type: 'png', fullPage: true })
+    await page.close(); page = null
+
+    res.json({ image: `data:image/png;base64,${screenshot.toString('base64')}` })
   } catch (err) {
+    if (page) try { await page.close() } catch (_) {}
     console.error('[dashboard/generate]', err)
     res.status(500).json({ error: err.message })
   }

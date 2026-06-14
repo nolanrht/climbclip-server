@@ -1,0 +1,131 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8">
+<style>
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+body{font-family:-apple-system,BlinkMacSystemFont,'Helvetica Neue',Arial,sans-serif;background:#fafafa;width:768px;color:#111;-webkit-font-smoothing:antialiased}
+
+.nav{height:54px;background:#1a0535;display:flex;align-items:center;padding:0 22px;gap:28px}
+.nav-brand{font-size:18px;font-weight:800;color:#a855f7;letter-spacing:-.02em}
+.nav-item{font-size:12px;color:rgba(255,255,255,.4)}
+.nav-item.active{color:#c084fc}
+
+.wrap{padding:30px 24px 0}
+.pg-title{font-size:22px;font-weight:700;color:#1a0535;margin-bottom:30px}
+
+.balance-row{display:flex;padding-bottom:28px;border-bottom:1.5px solid #ede0ff;margin-bottom:26px;background:#fff;border-radius:14px;padding:20px 20px 20px;margin-bottom:22px;box-shadow:0 1px 3px rgba(168,85,247,.08)}
+.bal{flex:1}
+.bal+.bal{padding-left:24px;border-left:1.5px solid #f0e8ff}
+.bal-label{font-size:11px;font-weight:600;letter-spacing:.07em;text-transform:uppercase;color:#c084fc;margin-bottom:8px}
+.bal-amount{font-size:36px;font-weight:700;letter-spacing:-.025em;color:#1a0535;line-height:1;margin-bottom:4px}
+.bal-amount.muted{color:#c084fc;font-size:28px}
+.bal-sub{font-size:11px;color:#ccc}
+
+.period-head{font-size:15px;font-weight:700;color:#1a0535;margin-bottom:3px}
+.period-dates{font-size:12px;color:#999;margin-bottom:20px}
+.divider{height:1.5px;background:#f0e8ff;margin:0 0 20px}
+
+.earn-row{display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:18px}
+.earn-net{font-size:28px;font-weight:700;letter-spacing:-.02em;color:#1a0535;line-height:1;margin-bottom:5px}
+.earn-sub{font-size:12px;color:#999}
+.badge{background:rgba(168,85,247,.12);color:#a855f7;font-size:13px;font-weight:600;padding:6px 15px;border-radius:99px;white-space:nowrap}
+
+.chart-main{display:block;margin:0 -24px}
+.chart-sec{display:block;margin:0 -24px}
+.date-axis{display:flex;justify-content:space-between;padding:6px 34px;border-bottom:1.5px solid #f0e8ff}
+.date-axis span{font-size:10.5px;color:#bbb}
+
+.stats-section{padding:26px 24px}
+.stats-title{font-size:13px;font-weight:700;color:#1a0535;margin-bottom:16px;text-transform:uppercase;letter-spacing:.06em}
+.stats-grid{display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-bottom:28px}
+.stat-card{background:#fff;border:1px solid #f0e8ff;border-radius:10px;padding:16px;box-shadow:0 1px 2px rgba(168,85,247,.06)}
+.stat-label{font-size:11px;color:#999;margin-bottom:6px}
+.stat-val{font-size:22px;font-weight:700;color:#1a0535}
+.stat-delta{font-size:11px;color:#a855f7;margin-top:2px}
+
+.txn-title{font-size:13px;font-weight:700;color:#1a0535;margin-bottom:14px;text-transform:uppercase;letter-spacing:.06em}
+.txn-row{display:flex;justify-content:space-between;align-items:center;padding:12px 0;border-bottom:1px solid #f5f0ff}
+.txn-type{font-size:13px;color:#444}
+.txn-date{font-size:11px;color:#bbb;margin-top:2px}
+.txn-amt{font-size:14px;font-weight:600;color:#1a0535}
+.txn-amt.neg{color:#f43f5e}
+</style>
+</head>
+<body>
+
+<nav class="nav">
+  <div class="nav-brand">Fanfix</div>
+  <div class="nav-item">Home</div>
+  <div class="nav-item">Messages</div>
+  <div class="nav-item active">Earnings</div>
+  <div class="nav-item">Profile</div>
+</nav>
+
+<div class="wrap">
+  <div class="pg-title">Earnings Overview</div>
+
+  <div class="balance-row">
+    <div class="bal">
+      <div class="bal-label">Current balance</div>
+      <div class="bal-amount">{{CURRENT_BAL}}</div>
+      <div class="bal-sub">Ready for withdrawal</div>
+    </div>
+    <div class="bal">
+      <div class="bal-label">Pending balance</div>
+      <div class="bal-amount muted">{{PENDING_BAL}}</div>
+      <div class="bal-sub">In review</div>
+    </div>
+  </div>
+
+  <div class="period-head">{{PERIODE}}</div>
+  <div class="period-dates">{{DATE_RANGE}}</div>
+  <div class="divider"></div>
+
+  <div class="earn-row">
+    <div>
+      <div class="earn-net">{{MONTANT_NET}}</div>
+      <div class="earn-sub">Net earnings &nbsp;·&nbsp; gross: {{MONTANT_BRUT}}</div>
+    </div>
+    <div class="badge">+{{GROWTH_PCT}}%</div>
+  </div>
+</div>
+
+<div class="chart-main">{{CHART_SVG}}</div>
+<div class="chart-sec">{{CHART_SVG2}}</div>
+<div class="date-axis">{{DATE_LABELS_HTML}}</div>
+
+<div class="stats-section">
+  <div class="stats-title">Analytics</div>
+  <div class="stats-grid">
+    <div class="stat-card">
+      <div class="stat-label">Supporters actifs</div>
+      <div class="stat-val">{{STAT_FANS}}</div>
+      <div class="stat-delta">↑ {{GROWTH_PCT}}% ce mois</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-label">Nouveaux supporters</div>
+      <div class="stat-val">{{STAT_NEW}}</div>
+      <div class="stat-delta">↑ {{STAT_NEW_PCT}}% vs précédent</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-label">Taux de rétention</div>
+      <div class="stat-val">{{STAT_RENEW}}%</div>
+      <div class="stat-delta">Période en cours</div>
+    </div>
+    <div class="stat-card">
+      <div class="stat-label">Revenu moyen</div>
+      <div class="stat-val">{{STAT_AVG}}</div>
+      <div class="stat-delta">Par supporter</div>
+    </div>
+  </div>
+
+  <div class="txn-title">Transactions récentes</div>
+  <div class="txn-row"><div><div class="txn-type">Abonnement mensuel</div><div class="txn-date">{{TXN_DATE1}}</div></div><div class="txn-amt">{{TXN_AMT1}}</div></div>
+  <div class="txn-row"><div><div class="txn-type">Pourboire</div><div class="txn-date">{{TXN_DATE2}}</div></div><div class="txn-amt">{{TXN_AMT2}}</div></div>
+  <div class="txn-row"><div><div class="txn-type">Contenu exclusif</div><div class="txn-date">{{TXN_DATE3}}</div></div><div class="txn-amt">{{TXN_AMT3}}</div></div>
+  <div class="txn-row"><div><div class="txn-type">Payout</div><div class="txn-date">{{TXN_DATE4}}</div></div><div class="txn-amt neg">{{TXN_AMT4}}</div></div>
+</div>
+
+</body>
+</html>
