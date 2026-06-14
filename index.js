@@ -1597,18 +1597,30 @@ app.post('/retouch/remove-text', uploadLimiter, uploadMem.single('image'), async
 
 // ─── DASHBOARD IMAGE GENERATION ─────────────────────────────────────────────
 const DASH_ACCENT = {
-  OF: '#00aff0', Fanfix: '#a855f7', Fanvue: '#14b8a6', Reveal: '#f43f5e', Inflow: '#f97316'
+  OF: '#00aff0', Fanfix: '#a855f7', Fanvue: '#14b8a6', Reveal: '#f97316'
 }
 
-function dashOrganic(total, n) {
-  const r = []
+// Seeded LCG so the same gross amount always produces the same chart shape
+function seededRng(seed) {
+  let s = (Math.abs(Math.round(seed)) || 1) & 0x7fffffff
+  return () => { s = (s * 1664525 + 1013904223) >>> 0; return s / 0x100000000 }
+}
+
+// Peak = gross; all other points 60–95% of gross with organic variation
+function dashOrganic(gross, n, seed) {
+  const rng = seededRng(seed !== undefined ? seed : gross)
+  const pts = []
   for (let i = 0; i < n; i++) {
-    const wd = i % 7, wb = wd >= 5 ? 1.4 : 1.0
-    const tr = 0.7 + 0.6 * i / n
-    r.push(wb * tr * (0.5 + Math.random()))
+    const wkBoost = (i % 7) >= 5 ? 1.12 : 1.0
+    const trend   = 0.88 + 0.12 * (i / Math.max(n - 1, 1))
+    const base    = (0.60 + rng() * 0.35) * wkBoost * trend
+    pts.push(Math.max(0.01, base * (1 + (rng() - 0.5) * 0.07)))
   }
-  const s = r.reduce((a, b) => a + b, 0)
-  return r.map(v => v / s * total)
+  const mx = Math.max(...pts)
+  const scaled = pts.map(v => (v / mx) * gross)
+  // Force the highest bar to equal gross exactly
+  scaled[scaled.indexOf(Math.max(...scaled))] = gross
+  return scaled
 }
 
 function escXml(s) {
@@ -1622,8 +1634,8 @@ app.post('/dashboard/generate', genericLimiter, async (req, res) => {
     const tpl = (template || 'OF').trim()
     const accent = DASH_ACCENT[tpl] || '#00aff0'
 
-    // Fetch template image from Vercel public URL
-    const imageUrl = `https://climbclip.vercel.app/public/templates/${tpl}.png`
+    // Fetch template image from Vercel public URL (Next.js serves /public at root)
+    const imageUrl = `https://climbclip.vercel.app/templates/${tpl}.png`
     const imgFetch = await fetch(imageUrl)
     if (!imgFetch.ok) return res.status(404).json({ error: `Template introuvable: ${tpl}` })
     const buf = Buffer.from(await imgFetch.arrayBuffer())
@@ -1699,8 +1711,8 @@ app.post('/dashboard/generate', genericLimiter, async (req, res) => {
     )
 
     // ── Zone 6: Main chart (768×290) ─────────────────────────────────────────
-    const cData = dashOrganic(gross, bars)
-    const maxV = Math.max(...cData)
+    const cData = dashOrganic(gross, bars, gross)
+    const maxV = Math.max(...cData) // always equals gross
     const cW = 768, cH = 290
     const padL = 58, padR = 16, padT = 22, padB = 38
     const pW = cW - padL - padR, pH = cH - padT - padB
@@ -1740,7 +1752,7 @@ app.post('/dashboard/generate', genericLimiter, async (req, res) => {
     )
 
     // ── Zone 7: Secondary chart (768×100) ────────────────────────────────────
-    const cData2 = dashOrganic(gross * 0.12, bars)
+    const cData2 = dashOrganic(gross * 0.12, bars, gross + 1)
     const maxV2 = Math.max(...cData2)
     const c2W = 768, c2H = 100, c2pL = 10, c2pR = 10, c2pT = 8, c2pB = 8
     const c2pW = c2W - c2pL - c2pR, c2pH = c2H - c2pT - c2pB
@@ -1763,13 +1775,21 @@ app.post('/dashboard/generate', genericLimiter, async (req, res) => {
       `<path d="${line2}" fill="none" stroke="#bbbbbb" stroke-width="1.5" stroke-linecap="round"/>`
     )
 
-    // ── Zone 8: Date labels (768×65) ─────────────────────────────────────────
+    // ── Zone 8: Date labels (768×65) — format depends on period ──────────────
+    let fmtXLabel
+    if (period === '24h') {
+      fmtXLabel = d => `${d.getHours()}h`
+    } else if (period === '7d' || period === '1w') {
+      fmtXLabel = d => d.toLocaleDateString('fr-FR', { weekday: 'short' }).replace('.', '')
+    } else {
+      fmtXLabel = d => d.toLocaleDateString('fr-FR', { day: 'numeric', month: 'short' })
+    }
     let dateLabels = ''
     for (let i = 0; i < 5; i++) {
       const t = i / 4
       const d = new Date(pStart.getTime() + t * (pEnd.getTime() - pStart.getTime()))
       const lx = (padL + t * pW).toFixed(1)
-      dateLabels += `<text x="${lx}" y="30" font-family="Arial,sans-serif" font-size="11" fill="#aaaaaa" text-anchor="middle">${escXml(fmtShort(d))}</text>`
+      dateLabels += `<text x="${lx}" y="30" font-family="Arial,sans-serif" font-size="11" fill="#aaaaaa" text-anchor="middle">${escXml(fmtXLabel(d))}</text>`
     }
     addSvg(0, 1106, 768, 65, dateLabels)
 
