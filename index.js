@@ -1149,7 +1149,7 @@ function flatFillMedian(px, origMask, w, h) {
 
 // ── PatchMatch 11×11, radius 60px, top-5 candidats + selection par coherence couleur ──
 function patchMatchFill(px, origMask, w, h) {
-  const HALF   = 5   // patch 11×11
+  const HALF   = 7   // patch 15×15
   const RADIUS = 35  // rayon de recherche
   const K      = 30  // candidats aleatoires par pixel
 
@@ -1255,30 +1255,58 @@ function patchMatchFill(px, origMask, w, h) {
   }
 }
 
-// ── Poisson blending simplifie : force la continuite couleur/luminosite au bord ──
-// Pour chaque pixel rempli : final = rempli + (moy_voisins_originaux - moy_voisins_remplis) * 0.7
+// ── Poisson blending : propagation concentrique du gradient de luminosite ──────
+// Resout l'equation de Laplace sur la luminosite (Gauss-Seidel en ordre BFS).
+// La luminosite harmonique interpole lissement depuis le bord du masque vers le centre.
+// On applique uniquement le delta de luminosite pour preserver la texture PatchMatch.
 function poissonBlend(px, origMask, w, h) {
-  const snap = new Uint8ClampedArray(px.length); snap.set(px)
-  for (let y = 0; y < h; y++) {
-    for (let x = 0; x < w; x++) {
-      const i = y*w+x; if (!origMask[i]) continue
-      let or_=0, og=0, ob=0, ocnt=0, fr=0, fg=0, fb=0, fcnt=0
-      const offsets = []
-      if (x > 0)   offsets.push(i-1)
-      if (x < w-1) offsets.push(i+1)
-      if (y > 0)   offsets.push(i-w)
-      if (y < h-1) offsets.push(i+w)
-      for (const ni of offsets) {
-        const n4 = ni*4
-        if (!origMask[ni]) { or_+=snap[n4]; og+=snap[n4+1]; ob+=snap[n4+2]; ocnt++ }
-        else                { fr +=snap[n4]; fg+=snap[n4+1]; fb+=snap[n4+2]; fcnt++ }
-      }
-      if (!ocnt || !fcnt) continue
-      const i4 = i*4
-      px[i4]   = Math.max(0, Math.min(255, Math.round(snap[i4]   + (or_/ocnt - fr/fcnt) * 0.7)))
-      px[i4+1] = Math.max(0, Math.min(255, Math.round(snap[i4+1] + (og/ocnt  - fg/fcnt) * 0.7)))
-      px[i4+2] = Math.max(0, Math.min(255, Math.round(snap[i4+2] + (ob/ocnt  - fb/fcnt) * 0.7)))
+  const N = w * h
+
+  // Distance BFS depuis les pixels originaux (non-masques)
+  const dist = new Uint16Array(N).fill(65535)
+  const bfsQ = []
+  for (let i = 0; i < N; i++) if (!origMask[i]) { dist[i] = 0; bfsQ.push(i) }
+  for (let qi = 0; qi < bfsQ.length; qi++) {
+    const i = bfsQ[qi], x = i%w, y = (i/w)|0, d = dist[i]+1
+    if (x > 0   && dist[i-1] > d) { dist[i-1] = d; bfsQ.push(i-1) }
+    if (x < w-1 && dist[i+1] > d) { dist[i+1] = d; bfsQ.push(i+1) }
+    if (y > 0   && dist[i-w] > d) { dist[i-w] = d; bfsQ.push(i-w) }
+    if (y < h-1 && dist[i+w] > d) { dist[i+w] = d; bfsQ.push(i+w) }
+  }
+
+  // Pixels remplis dans l'ordre BFS (du bord vers le centre)
+  const filled = []
+  for (const i of bfsQ) { if (origMask[i]) filled.push(i) }
+
+  // Luminosites initiales (bord = valeurs originales fixes, centre = valeurs inpaintees)
+  const harmLum = new Float32Array(N)
+  for (let i = 0; i < N; i++) {
+    harmLum[i] = 0.299*px[i*4] + 0.587*px[i*4+1] + 0.114*px[i*4+2]
+  }
+
+  // 30 iterations Gauss-Seidel en ordre BFS : converge rapidement car
+  // chaque iteration propage l'information depuis le bord (deja mis a jour)
+  for (let iter = 0; iter < 30; iter++) {
+    for (const idx of filled) {
+      const x = idx%w, y = (idx/w)|0
+      let sum = 0, cnt = 0
+      if (x > 0)   { sum += harmLum[idx-1]; cnt++ }
+      if (x < w-1) { sum += harmLum[idx+1]; cnt++ }
+      if (y > 0)   { sum += harmLum[idx-w]; cnt++ }
+      if (y < h-1) { sum += harmLum[idx+w]; cnt++ }
+      if (cnt) harmLum[idx] = sum / cnt
     }
+  }
+
+  // Applique uniquement la correction de luminosite (preserve la texture/couleur inpaintee)
+  for (const idx of filled) {
+    const lum_inp = 0.299*px[idx*4] + 0.587*px[idx*4+1] + 0.114*px[idx*4+2]
+    const delta   = harmLum[idx] - lum_inp
+    if (Math.abs(delta) < 0.5) continue
+    const i4 = idx*4
+    px[i4]   = Math.max(0, Math.min(255, Math.round(px[i4]   + delta)))
+    px[i4+1] = Math.max(0, Math.min(255, Math.round(px[i4+1] + delta)))
+    px[i4+2] = Math.max(0, Math.min(255, Math.round(px[i4+2] + delta)))
   }
 }
 
@@ -1413,7 +1441,9 @@ app.post("/retouch/inpaint", uploadLimiter, async (req, res) => {
         }
       }
 
-      // PatchMatch 11×11 — 3 passes BFS depuis les bords, top-5 + selection couleur voisins
+      // PatchMatch 15×15 — 5 passes BFS depuis les bords, top-5 + selection couleur voisins
+      patchMatchFill(px, origMask, W, H)
+      patchMatchFill(px, origMask, W, H)
       patchMatchFill(px, origMask, W, H)
       patchMatchFill(px, origMask, W, H)
       patchMatchFill(px, origMask, W, H)
@@ -1422,8 +1452,8 @@ app.post("/retouch/inpaint", uploadLimiter, async (req, res) => {
     // Poisson blending : force la continuite couleur/luminosite au bord du masque
     poissonBlend(px, origMask, W, H)
 
-    // Feathering lineaire 25px
-    featherBlend(px, origMask, W, H, 25)
+    // Feathering lineaire 30px
+    featherBlend(px, origMask, W, H, 30)
 
     // Coherence couleur et ajustement luminosite globale
     colorCoherence(px, origMask, W, H, 5)
