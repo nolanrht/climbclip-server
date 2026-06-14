@@ -1596,8 +1596,7 @@ app.post('/retouch/remove-text', uploadLimiter, uploadMem.single('image'), async
 })
 
 // ─── DASHBOARD IMAGE GENERATION ─────────────────────────────────────────────
-const { createCanvas, loadImage } = require('canvas')
-
+// No native deps: sharp for compositing, SVG strings for all drawing
 const DASH_ACCENT = {
   OF: '#00aff0', Fanfix: '#a855f7', Fanvue: '#14b8a6', Reveal: '#f97316'
 }
@@ -1624,60 +1623,40 @@ function dashOrganic(gross, n, seed) {
   return scaled
 }
 
-// Draw a smooth quadratic bezier line through pts array [{x,y}]
-function smoothLine(ctx, pts) {
-  ctx.beginPath()
-  ctx.moveTo(pts[0].x, pts[0].y)
+function escXml(s) {
+  return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+}
+
+// Estimate font size so text fits maxW (Arial number chars ≈ 0.58× size)
+function fitSvgSize(text, maxW, startSize) {
+  let s = startSize
+  while (s > 9 && text.length * s * 0.60 > maxW) s -= 2
+  return s
+}
+
+// Build SVG quadratic bezier midpoint path string from [{x,y}] points
+function svgSmooth(pts) {
+  let d = `M ${pts[0].x.toFixed(1)} ${pts[0].y.toFixed(1)}`
   for (let i = 0; i < pts.length - 1; i++) {
-    const mx = (pts[i].x + pts[i + 1].x) / 2
-    const my = (pts[i].y + pts[i + 1].y) / 2
-    ctx.quadraticCurveTo(pts[i].x, pts[i].y, mx, my)
+    const mx = ((pts[i].x + pts[i + 1].x) / 2).toFixed(1)
+    const my = ((pts[i].y + pts[i + 1].y) / 2).toFixed(1)
+    d += ` Q ${pts[i].x.toFixed(1)} ${pts[i].y.toFixed(1)} ${mx} ${my}`
   }
-  ctx.lineTo(pts[pts.length - 1].x, pts[pts.length - 1].y)
-}
-
-// Rounded rect path
-function roundRect(ctx, x, y, w, h, r) {
-  ctx.beginPath()
-  ctx.moveTo(x + r, y)
-  ctx.lineTo(x + w - r, y)
-  ctx.quadraticCurveTo(x + w, y, x + w, y + r)
-  ctx.lineTo(x + w, y + h - r)
-  ctx.quadraticCurveTo(x + w, y + h, x + w - r, y + h)
-  ctx.lineTo(x + r, y + h)
-  ctx.quadraticCurveTo(x, y + h, x, y + h - r)
-  ctx.lineTo(x, y + r)
-  ctx.quadraticCurveTo(x, y, x + r, y)
-  ctx.closePath()
-}
-
-// hex color → rgba string
-function hexRgba(hex, a) {
-  const r = parseInt(hex.slice(1, 3), 16)
-  const g = parseInt(hex.slice(3, 5), 16)
-  const b = parseInt(hex.slice(5, 7), 16)
-  return `rgba(${r},${g},${b},${a})`
+  return d + ` L ${pts[pts.length - 1].x.toFixed(1)} ${pts[pts.length - 1].y.toFixed(1)}`
 }
 
 app.post('/dashboard/generate', genericLimiter, async (req, res) => {
   try {
     const { amount, period, template, startDate, endDate } = req.body
-    const gross = parseFloat(amount) || 0
-    const tpl   = (template || 'OF').trim()
-    const accent = DASH_ACCENT[tpl] || '#00aff0'
+    const gross    = parseFloat(amount) || 0
+    const tpl      = (template || 'OF').trim()
+    const accent   = DASH_ACCENT[tpl] || '#00aff0'
     const isInflow = tpl === 'Reveal' // Reveal key = Inflow display (no fee deduction)
 
     // Fetch template from Vercel (Next.js serves /public at root)
     const imgFetch = await fetch(`https://climbclip.vercel.app/templates/${tpl}.png`)
     if (!imgFetch.ok) return res.status(404).json({ error: `Template introuvable: ${tpl}` })
-    const imgBuf = Buffer.from(await imgFetch.arrayBuffer())
-
-    // Load into canvas and draw as background
-    const templateImg = await loadImage(imgBuf)
-    const W = 768, H = 1360
-    const canvas = createCanvas(W, H)
-    const ctx = canvas.getContext('2d')
-    ctx.drawImage(templateImg, 0, 0, W, H)
+    const buf = Buffer.from(await imgFetch.arrayBuffer())
 
     // Period
     let bars = 30, pStart, pEnd
@@ -1703,149 +1682,137 @@ app.post('/dashboard/generate', genericLimiter, async (req, res) => {
     }
 
     // Financials — seeded so same input = same output
-    const rng0 = seededRng(gross)
-    const net      = isInflow ? gross : gross * 0.80
-    const curBal   = gross * (0.06 + rng0() * 0.04)
-    const pendBal  = gross * (0.22 + rng0() * 0.08)
+    const rng0      = seededRng(gross)
+    const net       = isInflow ? gross : gross * 0.80
+    const curBal    = gross * (0.06 + rng0() * 0.04)
+    const pendBal   = gross * (0.22 + rng0() * 0.08)
     const growthPct = Math.floor(15 + rng0() * 30)
+    const fmtUSD    = v => '$' + v.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
 
-    const fmtUSD = v => '$' + v.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
-
-    // Erase zone with white
-    const erase = (x, y, w, h) => { ctx.fillStyle = '#ffffff'; ctx.fillRect(x, y, w, h) }
-
-    // Set ctx.font, shrinking until text fits maxW; returns final size
-    function fitFont(text, maxW, size, bold = true) {
-      let s = size
-      do { ctx.font = `${bold ? '700 ' : ''}${s}px Arial`; s -= 1 }
-      while (s > 8 && ctx.measureText(text).width > maxW)
+    // Each zone becomes a sharp composite: SVG over white rect
+    const composites = []
+    function zone(left, top, w, h, svgBody) {
+      composites.push({
+        input: Buffer.from(
+          `<svg width="${w}" height="${h}" xmlns="http://www.w3.org/2000/svg">` +
+          `<rect width="${w}" height="${h}" fill="#ffffff"/>` +
+          svgBody + `</svg>`
+        ),
+        left, top
+      })
     }
 
-    // ── Zone 1: Current balance (x=35,y=183,w=310,h=90) ─────────────────────
-    erase(35, 183, 310, 90)
+    // ── Zone 1: Current balance ──────────────────────────────────────────────
     const curBalStr = fmtUSD(curBal)
-    fitFont(curBalStr, 290, 48)
-    ctx.fillStyle = '#000000'
-    ctx.fillText(curBalStr, 35, 238)
-    ctx.font = '400 13px Arial'; ctx.fillStyle = '#888888'
-    ctx.fillText('Current balance', 35, 258)
+    const fs1 = fitSvgSize(curBalStr, 288, 48)
+    zone(35, 183, 310, 90,
+      `<text x="0" y="${fs1}" font-family="Arial" font-size="${fs1}" font-weight="700" fill="#000">${escXml(curBalStr)}</text>` +
+      `<text x="0" y="${fs1 + 22}" font-family="Arial" font-size="13" fill="#888">Current balance</text>`
+    )
 
-    // ── Zone 2: Pending balance (x=393,y=183,w=342,h=90) ────────────────────
-    erase(393, 183, 342, 90)
+    // ── Zone 2: Pending balance ──────────────────────────────────────────────
     const pendBalStr = fmtUSD(pendBal)
-    fitFont(pendBalStr, 320, 36)
-    ctx.fillStyle = '#888888'
-    ctx.fillText(pendBalStr, 393, 225)
-    ctx.font = '400 13px Arial'; ctx.fillStyle = '#aaaaaa'
-    ctx.fillText('Pending balance', 393, 245)
+    const fs2 = fitSvgSize(pendBalStr, 318, 36)
+    zone(393, 183, 342, 90,
+      `<text x="0" y="${fs2}" font-family="Arial" font-size="${fs2}" font-weight="700" fill="#888">${escXml(pendBalStr)}</text>` +
+      `<text x="0" y="${fs2 + 22}" font-family="Arial" font-size="13" fill="#aaa">Pending balance</text>`
+    )
 
-    // ── Zone 3: Period label (x=35,y=500,w=240,h=50) ────────────────────────
-    erase(35, 500, 240, 50)
+    // ── Zone 3: Period label ─────────────────────────────────────────────────
     const periodLabel = period === '24h' ? '24 heures' : period === '7d' ? '7 jours' : period === '1w' ? '1 semaine' : '30 jours'
-    ctx.font = '700 18px Arial'; ctx.fillStyle = '#000000'
-    ctx.fillText(periodLabel, 35, 530)
+    zone(35, 500, 240, 50,
+      `<text x="0" y="30" font-family="Arial" font-size="18" font-weight="700" fill="#000">${escXml(periodLabel)}</text>`
+    )
 
-    // ── Zone 4: Date range (x=35,y=538,w=700,h=38) ──────────────────────────
-    erase(35, 538, 700, 38)
-    ctx.font = '400 13px Arial'; ctx.fillStyle = '#666666'
-    ctx.fillText(`${fmtDate(pStart)} – ${fmtDate(pEnd)}`, 35, 562)
+    // ── Zone 4: Date range ───────────────────────────────────────────────────
+    zone(35, 538, 700, 38,
+      `<text x="0" y="24" font-family="Arial" font-size="13" fill="#666">${escXml(fmtDate(pStart))} – ${escXml(fmtDate(pEnd))}</text>`
+    )
 
-    // ── Zone 5: Earnings (x=35,y=643,w=730,h=75) ────────────────────────────
-    erase(35, 643, 730, 75)
+    // ── Zone 5: Earnings ─────────────────────────────────────────────────────
     if (isInflow) {
-      fitFont(fmtUSD(gross), 420, 28)
-      ctx.fillStyle = '#000000'
-      ctx.fillText(fmtUSD(gross), 35, 673)
-      ctx.font = '400 13px Arial'; ctx.fillStyle = '#888888'
-      ctx.fillText('Montant brut', 35, 695)
+      const fs5 = fitSvgSize(fmtUSD(gross), 420, 28)
+      zone(35, 643, 730, 75,
+        `<text x="0" y="${fs5}" font-family="Arial" font-size="${fs5}" font-weight="700" fill="#000">${escXml(fmtUSD(gross))}</text>` +
+        `<text x="0" y="${fs5 + 22}" font-family="Arial" font-size="13" fill="#888">Montant brut</text>`
+      )
     } else {
-      fitFont(fmtUSD(net), 300, 28)
-      ctx.fillStyle = '#000000'
-      ctx.fillText(fmtUSD(net), 35, 673)
-      ctx.font = '400 13px Arial'; ctx.fillStyle = '#888888'
-      ctx.fillText(`Net earnings  ·  gross: ${fmtUSD(gross)}`, 35, 695)
-      // Growth badge
-      roundRect(ctx, 435, 650, 80, 26, 13)
-      ctx.fillStyle = hexRgba('#00b374', 0.12); ctx.fill()
-      ctx.font = '600 13px Arial'; ctx.fillStyle = '#00b374'
-      ctx.textAlign = 'center'
-      ctx.fillText(`+${growthPct}%`, 475, 668)
-      ctx.textAlign = 'left'
+      const fs5 = fitSvgSize(fmtUSD(net), 320, 28)
+      const subLine = `Net earnings  ·  gross: ${fmtUSD(gross)}`
+      zone(35, 643, 730, 75,
+        `<text x="0" y="${fs5}" font-family="Arial" font-size="${fs5}" font-weight="700" fill="#000">${escXml(fmtUSD(net))}</text>` +
+        `<text x="0" y="${fs5 + 22}" font-family="Arial" font-size="13" fill="#888">${escXml(subLine)}</text>` +
+        `<rect x="430" y="${fs5 - 16}" width="80" height="24" rx="12" fill="#00b37418"/>` +
+        `<text x="470" y="${fs5 + 3}" font-family="Arial" font-size="13" font-weight="600" fill="#00b374" text-anchor="middle">+${growthPct}%</text>`
+      )
     }
 
-    // ── Zone 6: Main chart (x=0,y=714,w=768,h=290) ──────────────────────────
+    // ── Zone 6: Main chart (768×290) ─────────────────────────────────────────
     const cData = dashOrganic(gross, bars, gross)
-    const CX = 0, CY = 714, CW = 768, CH = 290
+    const CW = 768, CH = 290
     const PL = 58, PR = 16, PT = 22, PB = 38
     const PW = CW - PL - PR, PH = CH - PT - PB
 
-    erase(CX, CY, CW, CH)
-
-    // Grid + Y labels
+    // Grid + Y-axis labels
+    let gridSvg = ''
     for (let i = 0; i <= 4; i++) {
-      const v  = gross * (1 - i / 4)
-      const yy = CY + PT + PH * i / 4
-      ctx.beginPath(); ctx.moveTo(CX + PL, yy); ctx.lineTo(CX + CW - PR, yy)
-      ctx.strokeStyle = '#eeeeee'; ctx.lineWidth = 1; ctx.stroke()
+      const v   = gross * (1 - i / 4)
+      const yy  = (PT + PH * i / 4).toFixed(1)
       const lbl = v >= 1000 ? `$${Math.round(v / 1000)}k` : `$${Math.round(v)}`
-      ctx.font = '400 10px Arial'; ctx.fillStyle = '#bbbbbb'
-      ctx.textAlign = 'right'
-      ctx.fillText(lbl, CX + PL - 5, yy + 4)
+      gridSvg += `<line x1="${PL}" y1="${yy}" x2="${CW - PR}" y2="${yy}" stroke="#eeeeee" stroke-width="1"/>`
+      gridSvg += `<text x="${PL - 5}" y="${(+yy + 4).toFixed(1)}" font-family="Arial" font-size="10" fill="#bbb" text-anchor="end">${escXml(lbl)}</text>`
     }
-    ctx.textAlign = 'left'
 
-    // Chart points
+    // Chart points (relative to the SVG, which starts at y=714 on the image)
     const pts = cData.map((v, i) => ({
-      x: CX + PL + (bars > 1 ? i / (bars - 1) : 0) * PW,
-      y: CY + PT + (1 - v / gross) * PH
+      x: PL + (bars > 1 ? i / (bars - 1) : 0) * PW,
+      y: PT + (1 - v / gross) * PH
     }))
+    const linePath = svgSmooth(pts)
+    const fillPath = linePath +
+      ` L ${pts[pts.length - 1].x.toFixed(1)} ${(PT + PH).toFixed(1)}` +
+      ` L ${PL} ${(PT + PH).toFixed(1)} Z`
 
-    // Gradient fill under line
-    const grad = ctx.createLinearGradient(0, CY + PT, 0, CY + PT + PH)
-    grad.addColorStop(0, hexRgba(accent, 0.28))
-    grad.addColorStop(1, hexRgba(accent, 0.02))
-    smoothLine(ctx, pts)
-    ctx.lineTo(pts[pts.length - 1].x, CY + PT + PH)
-    ctx.lineTo(pts[0].x, CY + PT + PH)
-    ctx.closePath()
-    ctx.fillStyle = grad; ctx.fill()
+    zone(0, 714, CW, CH,
+      `<defs><linearGradient id="cg" x1="0" y1="0" x2="0" y2="1">` +
+      `<stop offset="0%" stop-color="${accent}" stop-opacity="0.28"/>` +
+      `<stop offset="100%" stop-color="${accent}" stop-opacity="0.02"/>` +
+      `</linearGradient></defs>` +
+      gridSvg +
+      `<path d="${fillPath}" fill="url(#cg)"/>` +
+      `<path d="${linePath}" fill="none" stroke="${accent}" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>`
+    )
 
-    // Line stroke
-    smoothLine(ctx, pts)
-    ctx.strokeStyle = accent; ctx.lineWidth = 2.5
-    ctx.lineJoin = 'round'; ctx.lineCap = 'round'; ctx.stroke()
-
-    // ── Zone 7: Secondary chart (x=0,y=1007,w=768,h=100) ────────────────────
-    const cData2  = dashOrganic(gross * 0.12, bars, gross + 1)
-    const maxV2   = Math.max(...cData2)
-    const C2Y = 1007, C2H = 100
+    // ── Zone 7: Secondary chart (768×100) ────────────────────────────────────
+    const cData2 = dashOrganic(gross * 0.12, bars, gross + 1)
+    const maxV2  = Math.max(...cData2)
     const C2PL = 10, C2PR = 10, C2PT = 8, C2PB = 8
-    const C2PW = CW - C2PL - C2PR, C2PH = C2H - C2PT - C2PB
-
-    erase(0, C2Y, CW, C2H)
+    const C2PW = CW - C2PL - C2PR, C2PH = 100 - C2PT - C2PB
     const pts2 = cData2.map((v, i) => ({
       x: C2PL + (bars > 1 ? i / (bars - 1) : 0) * C2PW,
-      y: C2Y + C2PT + (1 - v / maxV2) * C2PH
+      y: C2PT + (1 - v / maxV2) * C2PH
     }))
-    smoothLine(ctx, pts2)
-    ctx.lineTo(pts2[pts2.length - 1].x, C2Y + C2PT + C2PH)
-    ctx.lineTo(pts2[0].x, C2Y + C2PT + C2PH)
-    ctx.closePath()
-    ctx.fillStyle = 'rgba(136,136,136,0.08)'; ctx.fill()
-    smoothLine(ctx, pts2)
-    ctx.strokeStyle = '#cccccc'; ctx.lineWidth = 1.5; ctx.stroke()
+    const line2 = svgSmooth(pts2)
+    const fill2 = line2 +
+      ` L ${pts2[pts2.length - 1].x.toFixed(1)} ${(C2PT + C2PH).toFixed(1)}` +
+      ` L ${C2PL} ${(C2PT + C2PH).toFixed(1)} Z`
 
-    // ── Zone 8: Date labels (x=0,y=1106,w=768,h=65) ─────────────────────────
-    erase(0, 1106, CW, 65)
-    ctx.font = '400 11px Arial'; ctx.fillStyle = '#aaaaaa'; ctx.textAlign = 'center'
+    zone(0, 1007, CW, 100,
+      `<path d="${fill2}" fill="rgba(136,136,136,0.08)"/>` +
+      `<path d="${line2}" fill="none" stroke="#ccc" stroke-width="1.5" stroke-linecap="round"/>`
+    )
+
+    // ── Zone 8: Date labels (768×65) ─────────────────────────────────────────
+    let dateSvg = ''
     for (let i = 0; i < 5; i++) {
-      const t = i / 4
-      const d = new Date(pStart.getTime() + t * (pEnd.getTime() - pStart.getTime()))
-      ctx.fillText(fmtXLabel(d), CX + PL + t * PW, 1106 + 30)
+      const t  = i / 4
+      const d  = new Date(pStart.getTime() + t * (pEnd.getTime() - pStart.getTime()))
+      const lx = (PL + t * PW).toFixed(1)
+      dateSvg += `<text x="${lx}" y="30" font-family="Arial" font-size="11" fill="#aaa" text-anchor="middle">${escXml(fmtXLabel(d))}</text>`
     }
-    ctx.textAlign = 'left'
+    zone(0, 1106, CW, 65, dateSvg)
 
-    const out = canvas.toBuffer('image/png')
+    const out = await sharp(buf).composite(composites).png().toBuffer()
     res.json({ image: `data:image/png;base64,${out.toString('base64')}` })
   } catch (err) {
     console.error('[dashboard/generate]', err)
