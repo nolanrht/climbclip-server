@@ -1150,7 +1150,7 @@ function flatFillMedian(px, origMask, w, h) {
 // ── PatchMatch 11×11, radius 60px, top-5 candidats + selection par coherence couleur ──
 function patchMatchFill(px, origMask, w, h) {
   const HALF   = 5   // patch 11×11
-  const RADIUS = 60  // rayon de recherche
+  const RADIUS = 35  // rayon de recherche
   const K      = 30  // candidats aleatoires par pixel
 
   // BFS : bords du masque en premier, puis vers l'interieur
@@ -1413,15 +1413,17 @@ app.post("/retouch/inpaint", uploadLimiter, async (req, res) => {
         }
       }
 
-      // PatchMatch 11×11 — BFS depuis les bords, top-5 + selection couleur voisins
+      // PatchMatch 11×11 — 3 passes BFS depuis les bords, top-5 + selection couleur voisins
+      patchMatchFill(px, origMask, W, H)
+      patchMatchFill(px, origMask, W, H)
       patchMatchFill(px, origMask, W, H)
     }
 
     // Poisson blending : force la continuite couleur/luminosite au bord du masque
     poissonBlend(px, origMask, W, H)
 
-    // Feathering lineaire 10px
-    featherBlend(px, origMask, W, H, 10)
+    // Feathering lineaire 25px
+    featherBlend(px, origMask, W, H, 25)
 
     // Coherence couleur et ajustement luminosite globale
     colorCoherence(px, origMask, W, H, 5)
