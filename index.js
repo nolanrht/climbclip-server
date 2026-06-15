@@ -1678,7 +1678,7 @@ function seededRng(seed) {
   return () => { s = (s * 1664525 + 1013904223) >>> 0; return s / 0x100000000 }
 }
 
-// Peak = gross; all other points 60–95% of gross with organic variation
+// Peak = gross; for non-OF templates
 function dashOrganic(gross, n, seed) {
   const rng = seededRng(seed !== undefined ? seed : gross)
   const pts = []
@@ -1692,6 +1692,31 @@ function dashOrganic(gross, n, seed) {
   const scaled = pts.map(v => (v / mx) * gross)
   scaled[scaled.indexOf(Math.max(...scaled))] = gross
   return scaled
+}
+
+// Daily values that SUM to total (OF template: chart shows daily amounts)
+function dashDaily(total, n, seed) {
+  const rng = seededRng(seed !== undefined ? seed : total)
+  const pts = []
+  for (let i = 0; i < n; i++) {
+    const wkBoost = (i % 7) >= 5 ? 1.35 : 1.0
+    const trend   = 0.85 + 0.15 * (i / Math.max(n - 1, 1))
+    const base    = (0.4 + rng() * 1.0) * wkBoost * trend
+    pts.push(Math.max(0.01, base * (1 + (rng() - 0.5) * 0.12)))
+  }
+  const sum = pts.reduce((a, b) => a + b, 0)
+  return pts.map(v => (v / sum) * total)
+}
+
+// Round up to a clean Y-axis ceiling value
+function roundToNice(val) {
+  if (val <= 0) return 100
+  const mag  = Math.pow(10, Math.floor(Math.log10(val)))
+  const n    = val / mag
+  const nice = n <= 1.5 ? 1.5 : n <= 2 ? 2 : n <= 2.5 ? 2.5 : n <= 3 ? 3 :
+               n <= 4   ? 4   : n <= 5 ? 5 : n <= 6   ? 6   : n <= 7.5 ? 7.5 :
+               n <= 9   ? 9   : 10
+  return nice * mag
 }
 
 function escXml(s) {
@@ -1709,7 +1734,250 @@ function svgSmooth(pts) {
   return d + ` L ${pts[pts.length - 1].x.toFixed(1)} ${pts[pts.length - 1].y.toFixed(1)}`
 }
 
-// Build a full dashboard SVG — converted to PNG by sharp (no browser needed)
+// ─── OF TEMPLATE: pixel-perfect reproduction of OF.png ───────────────────────
+// Layout (768px wide, sections top→bottom):
+//  Nav tabs · Sub-tabs · Banner · Balance · Manual payouts · Period ·
+//  Filter tabs · Earnings headline · Main chart · Secondary chart ·
+//  Date labels · Bottom nav · Browser bar
+function buildOFSvg(d) {
+  const { curBal, pendBal, periodLabel, dateRange,
+          netAmt, grossAmt, growthPct,
+          cData, cData2, bars, dateLabels } = d
+
+  const W    = 768
+  const PAD  = 20
+  const BLUE = '#00aff0'
+  const BLK  = '#1a1a1a'
+  const DARK = '#333333'
+  const GRAY = '#666666'
+  const LGR  = '#9e9e9e'
+  const BDR  = '#e5e5e5'
+  const WHT  = '#ffffff'
+  const GRN  = '#44b37e'
+  const GNBG = '#e8f7ef'
+
+  const R = (x, y, w, h, fill, rx = 0, stroke = 'none', sw = 0) =>
+    `<rect x="${x}" y="${y}" width="${w}" height="${h}" fill="${fill}" rx="${rx}"` +
+    (stroke !== 'none' ? ` stroke="${stroke}" stroke-width="${sw}"` : '') + '/>'
+  const T = (x, ty, s, { fs = 14, fill = BLK, fw = 'normal', anchor = 'start', ls = '0' } = {}) =>
+    `<text x="${x}" y="${ty}" font-family="Liberation Sans,Arial,sans-serif" font-size="${fs}" fill="${fill}" font-weight="${fw}" text-anchor="${anchor}" letter-spacing="${ls}">${escXml(String(s))}</text>`
+  const L = (x1, y1, x2, y2, stroke, sw = 1) =>
+    `<line x1="${x1}" y1="${y1}" x2="${x2}" y2="${y2}" stroke="${stroke}" stroke-width="${sw}"/>`
+  const chev = (cx, cy) =>
+    `<polyline points="${cx-8},${cy-5} ${cx},${cy+5} ${cx+8},${cy-5}" fill="none" stroke="${LGR}" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>`
+
+  let b = '', y = 0
+
+  // 1 ── NAV TABS: STATEMENTS(active) OVERVIEW ENGAGEMENT REACH ─────────────
+  b += R(0, 0, W, 52, WHT)
+  const tabs = ['STATEMENTS', 'OVERVIEW', 'ENGAGEMENT', 'REACH']
+  const tabW = [148, 134, 182, 304]
+  let tx = 0
+  tabs.forEach((t, i) => {
+    const cx = tx + tabW[i] / 2
+    b += T(cx, 32, t, { fs: 11.5, fill: i === 0 ? BLK : LGR, fw: i === 0 ? '600' : '400', anchor: 'middle', ls: '0.5' })
+    if (i === 0) b += L(tx + 16, 50, tx + tabW[i] - 16, 50, BLUE, 2.5)
+    tx += tabW[i]
+  })
+  b += L(0, 51.5, W, 51.5, BDR, 1)
+  y = 52
+
+  // 2 ── SUB-TABS: Earnings(active) Payout Requests Chargebacks Referrals ───
+  b += R(0, y, W, 66, WHT)
+  const stabs = ['Earnings', 'Payout Requests', 'Chargebacks', 'Referrals']
+  const stabW = [110, 168, 148, 126]
+  let sx = PAD
+  stabs.forEach((t, i) => {
+    const tw = stabW[i]
+    if (i === 0) {
+      b += R(sx, y + 15, tw, 36, BLUE, 18)
+      b += T(sx + tw / 2, y + 38, t, { fs: 14, fill: WHT, fw: '500', anchor: 'middle' })
+    } else {
+      b += R(sx, y + 15, tw, 36, WHT, 18, BDR, 1.5)
+      b += T(sx + tw / 2, y + 38, t, { fs: 14, fill: GRAY, anchor: 'middle' })
+    }
+    sx += tw + 10
+  })
+  b += L(0, y + 65.5, W, y + 65.5, BDR, 1)
+  y += 66
+
+  // 3 ── BANNER: ★ YOU ARE IN THE TOP 0.01% OF ALL CREATORS! ───────────────
+  b += R(0, y, W, 50, WHT)
+  b += T(PAD, y + 31, '★', { fs: 18, fill: BLUE, fw: '700' })
+  b += T(PAD + 30, y + 31, 'YOU ARE IN THE TOP 0.01% OF ALL CREATORS!', { fs: 13, fill: BLK, fw: '700', ls: '0.2' })
+  b += L(0, y + 49.5, W, y + 49.5, BDR, 1)
+  y += 50
+
+  // 4 ── BALANCE ROW: $curBal (Current balance) | $pendBal (Pending balance ⓘ)
+  const BAL_H = 112
+  b += R(0, y, W, BAL_H, WHT)
+  const midX = 384
+  b += T(PAD, y + 55, curBal, { fs: 40, fill: BLK, fw: '700' })
+  b += T(PAD, y + 78, 'Current balance', { fs: 14, fill: LGR })
+  b += L(midX, y + 14, midX, y + 98, BDR, 1)
+  b += T(midX + PAD, y + 51, pendBal, { fs: 36, fill: LGR, fw: '700' })
+  b += T(midX + PAD, y + 75, 'Pending balance', { fs: 14, fill: LGR })
+  b += `<circle cx="${midX + PAD + 138}" cy="${y + 69}" r="9" fill="none" stroke="${LGR}" stroke-width="1.5"/>`
+  b += T(midX + PAD + 138, y + 73, 'i', { fs: 11, fill: LGR, fw: '600', anchor: 'middle' })
+  b += L(0, y + BAL_H - 0.5, W, y + BAL_H - 0.5, BDR, 1)
+  y += BAL_H
+
+  // 5 ── MANUAL PAYOUTS + REQUEST WITHDRAWAL button ─────────────────────────
+  const PAY_H = 130
+  b += R(0, y, W, PAY_H, WHT)
+  b += T(PAD, y + 30, 'Manual payouts', { fs: 17, fill: BLK, fw: '600' })
+  b += chev(W - PAD - 8, y + 25)
+  b += T(PAD, y + 52, 'Minimum withdrawal amount is $20', { fs: 13, fill: LGR })
+  const btnX = 400, btnW = W - btnX - PAD
+  b += R(btnX, y + 66, btnW, 50, BLUE, 25)
+  b += T(btnX + btnW / 2, y + 96, 'REQUEST WITHDRAWAL', { fs: 13, fill: WHT, fw: '700', anchor: 'middle', ls: '0.5' })
+  b += L(0, y + PAY_H - 0.5, W, y + PAY_H - 0.5, BDR, 1)
+  y += PAY_H
+
+  // 6 ── PERIOD: "Last 30 days" + date range ────────────────────────────────
+  const PER_H = 82
+  b += R(0, y, W, PER_H, WHT)
+  b += T(PAD, y + 34, periodLabel, { fs: 20, fill: BLK, fw: '700' })
+  b += chev(W - PAD - 8, y + 28)
+  b += T(PAD, y + 60, dateRange, { fs: 13, fill: LGR })
+  b += L(0, y + PER_H - 0.5, W, y + PER_H - 0.5, BDR, 1)
+  y += PER_H
+
+  // 7 ── FILTER TABS: All(active) Subscriptions Tips Posts Messages ──────────
+  b += R(0, y, W, 66, WHT)
+  const ftabs = ['All', 'Subscriptions', 'Tips', 'Posts', 'Messages']
+  const ftabW = [64, 158, 82, 88, 126]
+  let fx = PAD
+  ftabs.forEach((t, i) => {
+    const tw = ftabW[i]
+    if (i === 0) {
+      b += R(fx, y + 15, tw, 36, BLUE, 18)
+      b += T(fx + tw / 2, y + 38, t, { fs: 14, fill: WHT, fw: '500', anchor: 'middle' })
+    } else {
+      b += R(fx, y + 15, tw, 36, WHT, 18, BDR, 1.5)
+      b += T(fx + tw / 2, y + 38, t, { fs: 14, fill: GRAY, anchor: 'middle' })
+    }
+    fx += tw + 10
+  })
+  y += 66
+
+  // 8 ── EARNINGS: $net  ($gross Gross)  ↗ 26% ─────────────────────────────
+  b += R(0, y, W, 56, WHT)
+  b += T(PAD, y + 38, netAmt, { fs: 30, fill: BLK, fw: '700' })
+  const netTW = netAmt.length * 17.5
+  b += T(PAD + netTW + 8, y + 38, '(' + grossAmt + ' Gross)', { fs: 20, fill: BLUE })
+  const grossTW  = (grossAmt.length + 9) * 11.5
+  const badgeX   = PAD + netTW + 8 + grossTW + 10
+  const badgeTxt = '↗ ' + growthPct + '%'
+  const badgeW   = badgeTxt.length * 9 + 14
+  b += R(badgeX, y + 18, badgeW, 26, GNBG, 5)
+  b += T(badgeX + 7, y + 35, badgeTxt, { fs: 14, fill: GRN, fw: '600' })
+  y += 56
+
+  // 9 ── MAIN CHART: blue area, Y-labels right ($9,000 / $6,000 / $3,000) ───
+  const CH = 280, CPL = 8, CPR = 68, CPT = 16
+  const CPW = W - CPL - CPR, CPH = CH - CPT
+  const cy = y
+  b += R(0, cy, W, CH, '#f0faff')
+
+  const maxD  = Math.max(...cData)
+  const yTop  = roundToNice(maxD * 1.05)
+  const yLvls = [
+    { v: yTop,                   gy: cy + CPT },
+    { v: Math.round(yTop * 2/3), gy: cy + CPT + CPH * (1/3) },
+    { v: Math.round(yTop * 1/3), gy: cy + CPT + CPH * (2/3) },
+  ]
+  for (let i = 1; i <= 4; i++) b += L(CPL + CPW * i / 5, cy + CPT, CPL + CPW * i / 5, cy + CPT + CPH, BDR, 0.8)
+  yLvls.forEach(lv => b += L(CPL, lv.gy, W - CPR, lv.gy, BDR, 0.8))
+
+  const cPts = cData.map((v, i) => ({
+    x: CPL + (bars > 1 ? i / (bars - 1) : 0) * CPW,
+    y: cy + CPT + (1 - v / yTop) * CPH,
+  }))
+  const cLine = svgSmooth(cPts)
+  const cFill = cLine +
+    ` L ${cPts[cPts.length-1].x.toFixed(1)} ${(cy+CPT+CPH).toFixed(1)}` +
+    ` L ${CPL} ${(cy+CPT+CPH).toFixed(1)} Z`
+  b += `<defs><linearGradient id="ofG" x1="0" y1="0" x2="0" y2="1">` +
+    `<stop offset="0%" stop-color="${BLUE}" stop-opacity="0.28"/>` +
+    `<stop offset="100%" stop-color="${BLUE}" stop-opacity="0.04"/>` +
+    `</linearGradient></defs>`
+  b += `<path d="${cFill}" fill="url(#ofG)"/>`
+  b += `<path d="${cLine}" fill="none" stroke="${BLUE}" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>`
+  yLvls.forEach(lv => b += T(W - CPR + 10, lv.gy + 4, '$' + Math.round(lv.v).toLocaleString('en-US'), { fs: 13, fill: LGR }))
+  y = cy + CH
+
+  // 10 ── SECONDARY CHART: gray area, Y-labels 200 / 100 ───────────────────
+  const C2H = 98, C2PL = 8, C2PR = 68, C2PT = 10, C2PB = 8
+  const C2PW = W - C2PL - C2PR, C2PH = C2H - C2PT - C2PB
+  const c2y = y
+  b += R(0, c2y, W, C2H, WHT)
+  b += L(0, c2y, W, c2y, BDR, 0.8)
+  const maxV2 = Math.max(...cData2)
+  const y2Top = roundToNice(maxV2 * 1.15)
+  const c2Pts = cData2.map((v, i) => ({
+    x: C2PL + (bars > 1 ? i / (bars - 1) : 0) * C2PW,
+    y: c2y + C2PT + (1 - v / y2Top) * C2PH,
+  }))
+  const c2Line = svgSmooth(c2Pts)
+  const c2Fill = c2Line +
+    ` L ${c2Pts[c2Pts.length-1].x.toFixed(1)} ${(c2y+C2PT+C2PH).toFixed(1)}` +
+    ` L ${C2PL} ${(c2y+C2PT+C2PH).toFixed(1)} Z`
+  b += `<path d="${c2Fill}" fill="rgba(0,0,0,0.05)"/>`
+  b += `<path d="${c2Line}" fill="none" stroke="#aaaaaa" stroke-width="2" stroke-linecap="round"/>`
+  b += T(W - C2PR + 10, c2y + C2PT + 4, String(Math.round(y2Top)), { fs: 13, fill: LGR })
+  b += T(W - C2PR + 10, c2y + C2PT + C2PH * 0.5 + 4, String(Math.round(y2Top / 2)), { fs: 13, fill: LGR })
+  y = c2y + C2H
+
+  // 11 ── DATE LABELS: "May 4,\n2026" × 5 ──────────────────────────────────
+  b += R(0, y, W, 64, WHT)
+  dateLabels.forEach((lbl, i) => {
+    const lx     = CPL + (dateLabels.length > 1 ? i / (dateLabels.length - 1) : 0) * CPW
+    const anchor = i === 0 ? 'start' : i === dateLabels.length - 1 ? 'end' : 'middle'
+    const parts  = lbl.split('\n')
+    b += T(lx, y + 20, parts[0] || lbl, { fs: 13, fill: LGR, anchor })
+    if (parts[1]) b += T(lx, y + 38, parts[1], { fs: 13, fill: LGR, anchor })
+  })
+  y += 64
+
+  // 12 ── BOTTOM NAV BAR: Home Bell Plus-circle Chat Avatar ─────────────────
+  b += R(0, y, W, 76, WHT)
+  b += L(0, y, W, y, BDR, 1)
+  const icy = y + 38
+  const ix  = [77, 230, 384, 538, 691]
+  // Home (house outline)
+  b += `<path d="M${ix[0]-14},${icy-2} L${ix[0]},${icy-17} L${ix[0]+14},${icy-2}" fill="none" stroke="${LGR}" stroke-width="2" stroke-linejoin="round"/>`
+  b += `<rect x="${ix[0]-10}" y="${icy-2}" width="20" height="16" fill="none" stroke="${LGR}" stroke-width="2" stroke-linejoin="round"/>`
+  // Bell
+  b += `<path d="M${ix[1]},${icy-18} C${ix[1]-14},${icy-18} ${ix[1]-14},${icy-4} ${ix[1]-14},${icy} L${ix[1]+14},${icy} C${ix[1]+14},${icy-4} ${ix[1]+14},${icy-18} ${ix[1]},${icy-18}" fill="none" stroke="${LGR}" stroke-width="2"/>`
+  b += `<circle cx="${ix[1]}" cy="${icy+5}" r="4.5" fill="none" stroke="${LGR}" stroke-width="2"/>`
+  // Plus-circle
+  b += `<circle cx="${ix[2]}" cy="${icy-2}" r="19" fill="none" stroke="${LGR}" stroke-width="2"/>`
+  b += L(ix[2]-9, icy-2, ix[2]+9, icy-2, LGR, 2.2)
+  b += L(ix[2], icy-11, ix[2], icy+7, LGR, 2.2)
+  // Chat bubble
+  b += `<path d="M${ix[3]-16},${icy-16} L${ix[3]+16},${icy-16} L${ix[3]+16},${icy} L${ix[3]+6},${icy} L${ix[3]},${icy+9} L${ix[3]-6},${icy} L${ix[3]-16},${icy} Z" fill="none" stroke="${LGR}" stroke-width="2" stroke-linejoin="round"/>`
+  // Avatar
+  b += `<circle cx="${ix[4]}" cy="${icy-10}" r="9" fill="none" stroke="${LGR}" stroke-width="2"/>`
+  b += `<path d="M${ix[4]-17},${icy+14} C${ix[4]-17},${icy+2} ${ix[4]+17},${icy+2} ${ix[4]+17},${icy+14}" fill="none" stroke="${LGR}" stroke-width="2"/>`
+  y += 76
+
+  // 13 ── BROWSER BAR: AA  🔒 onlyfans.com  ↺ ───────────────────────────────
+  b += R(0, y, W, 56, '#f2f2f2')
+  b += T(PAD, y + 36, 'AA', { fs: 17, fill: LGR })
+  const lkX = W / 2 - 72
+  b += `<rect x="${lkX}" y="${y+18}" width="12" height="10" fill="none" stroke="${DARK}" stroke-width="1.5" rx="1.5"/>`
+  b += `<path d="M${lkX+2},${y+19} C${lkX+2},${y+13} ${lkX+10},${y+13} ${lkX+10},${y+19}" fill="none" stroke="${DARK}" stroke-width="1.5"/>`
+  b += T(lkX + 18, y + 36, 'onlyfans.com', { fs: 15, fill: DARK, fw: '500' })
+  b += T(W - PAD, y + 36, '↺', { fs: 22, fill: LGR, anchor: 'end' })
+  y += 56
+
+  return `<svg width="${W}" height="${y}" xmlns="http://www.w3.org/2000/svg">` +
+    `<rect width="${W}" height="${y}" fill="${WHT}"/>` +
+    b + `</svg>`
+}
+
+// ─── GENERIC DASHBOARD SVG (Fanfix / Fanvue / Reveal) ────────────────────────
 function buildDashSvg(tpl, d) {
   const c = DASH_CFG[tpl] || DASH_CFG.OF
   const accent = d.accent
@@ -1873,10 +2141,9 @@ app.post('/dashboard/generate', genericLimiter, async (req, res) => {
     const { amount, period, template, startDate, endDate } = req.body
     const gross    = parseFloat(amount) || 0
     const tpl      = (template || 'OF').trim()
-    const accent   = DASH_ACCENT[tpl] || '#00aff0'
     const isInflow = tpl === 'Reveal'
 
-    if (!DASH_CFG[tpl]) return res.status(404).json({ error: `Template introuvable: ${tpl}` })
+    if (tpl !== 'OF' && !DASH_CFG[tpl]) return res.status(404).json({ error: `Template introuvable: ${tpl}` })
 
     // Period
     let bars = 30, pStart, pEnd
@@ -1891,54 +2158,104 @@ app.post('/dashboard/generate', genericLimiter, async (req, res) => {
     } else {
       pStart = new Date(now - 30 * 86400000); pEnd = now
     }
-    const fmtDate = dt => dt.toLocaleDateString('fr-FR', { day: '2-digit', month: 'short', year: 'numeric' })
-    let fmtXLabel
-    if (period === '24h')             fmtXLabel = dt => `${dt.getHours()}h`
-    else if (period === '7d' || period === '1w') fmtXLabel = dt => dt.toLocaleDateString('fr-FR', { weekday: 'short' }).replace('.', '')
-    else                              fmtXLabel = dt => dt.toLocaleDateString('fr-FR', { day: 'numeric', month: 'short' })
 
-    const rng0       = seededRng(gross)
-    const net        = isInflow ? gross : gross * 0.80
-    const curBal     = gross * (0.06 + rng0() * 0.04)
-    const pendBal    = gross * (0.22 + rng0() * 0.08)
-    const growthPct  = Math.floor(15 + rng0() * 30)
-    const statFans   = Math.floor(gross / (8 + rng0() * 12))
-    const statNew    = Math.floor(statFans * (0.08 + rng0() * 0.12))
-    const statRenew  = Math.floor(72 + rng0() * 22)
-    const statNewPct = Math.floor(8 + rng0() * 24)
-    const fmtUSD     = v => '$' + v.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
-    const fmtShort   = v => '$' + (v >= 1000 ? (v/1000).toFixed(1)+'k' : v.toFixed(0))
+    // Shared financials (seeded)
+    const rng0      = seededRng(gross)
+    const net       = isInflow ? gross : gross * 0.80
+    const curBal    = gross * (0.06 + rng0() * 0.04)
+    const pendBal   = gross * (0.22 + rng0() * 0.08)
+    const growthPct = Math.floor(15 + rng0() * 30)
+    const fmtUSD    = v => '$' + v.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
 
-    const txnDates = [1,3,5,7].map(d => {
-      const dt = new Date(pEnd.getTime() - d * 86400000)
-      return dt.toLocaleDateString('fr-FR', { day: '2-digit', month: 'short', year: 'numeric' })
-    })
-    const txnAmts = [
-      fmtUSD(gross * (0.03 + rng0() * 0.04)),
-      fmtUSD(gross * (0.01 + rng0() * 0.02)),
-      fmtUSD(gross * (0.02 + rng0() * 0.03)),
-      `-${fmtUSD(gross * (0.55 + rng0() * 0.15))}`,
-    ]
-    const dateLabels = Array.from({ length: 5 }, (_, i) => {
-      const t  = i / 4
-      const dt = new Date(pStart.getTime() + t * (pEnd.getTime() - pStart.getTime()))
-      return fmtXLabel(dt)
-    })
-    const periodLabel = period === '24h' ? '24 heures' : period === '7d' ? '7 jours' : period === '1w' ? '1 semaine' : '30 jours'
+    let svgStr
 
-    const cData  = dashOrganic(gross, bars, gross)
-    const cData2 = dashOrganic(gross * 0.12, bars, gross + 1)
+    if (tpl === 'OF') {
+      // ── OF: pixel-perfect layout matching OF.png ──────────────────────────
+      // English date format to match real OnlyFans UI
+      const fmtEN = dt => dt.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })
+      const periodEN =
+        period === '24h'               ? 'Last 24 hours' :
+        period === '7d' || period === '1w' ? 'Last 7 days'   :
+        period === 'custom'            ? 'Custom period'  : 'Last 30 days'
+      const dateRangeEN = `${fmtEN(pStart)} - ${fmtEN(pEnd)} (local time UTC +02:00)`
 
-    const svgStr = buildDashSvg(tpl, {
-      accent, isInflow, gross, net,
-      curBal:  fmtUSD(curBal),
-      pendBal: fmtUSD(pendBal),
-      growthPct, statFans, statNew, statRenew, statNewPct,
-      statAvg: fmtShort(gross / Math.max(statFans, 1)),
-      txnDates, txnAmts, dateLabels, periodLabel,
-      dateRange: `${fmtDate(pStart)} – ${fmtDate(pEnd)}`,
-      cData, cData2, bars,
-    })
+      let fmtXLbl
+      if (period === '24h') {
+        fmtXLbl = dt => `${dt.getHours()}:00\n${dt.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}`
+      } else if (period === '7d' || period === '1w') {
+        fmtXLbl = dt => dt.toLocaleDateString('en-US', { weekday: 'short' }) +
+                        '\n' + dt.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })
+      } else {
+        fmtXLbl = dt => {
+          const md = dt.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })
+          return `${md},\n${dt.getFullYear()}`
+        }
+      }
+      const dateLabels = Array.from({ length: 5 }, (_, i) => {
+        const t  = i / 4
+        const dt = new Date(pStart.getTime() + t * (pEnd.getTime() - pStart.getTime()))
+        return fmtXLbl(dt)
+      })
+
+      // Daily net values summing to net (chart shows per-day earnings)
+      const cData  = dashDaily(net, bars, gross)
+      // Secondary chart: subscriber-scale daily counts (~200 range for typical gross)
+      const cData2 = dashDaily(gross * 0.02, bars, gross + 1)
+
+      svgStr = buildOFSvg({
+        curBal:     fmtUSD(curBal),
+        pendBal:    fmtUSD(pendBal),
+        periodLabel: periodEN,
+        dateRange:  dateRangeEN,
+        netAmt:     fmtUSD(net),
+        grossAmt:   fmtUSD(gross),
+        growthPct,
+        cData, cData2, bars, dateLabels,
+      })
+    } else {
+      // ── Fanfix / Fanvue / Reveal: generic SVG layout ──────────────────────
+      const accent   = DASH_ACCENT[tpl] || '#00aff0'
+      const fmtDate  = dt => dt.toLocaleDateString('fr-FR', { day: '2-digit', month: 'short', year: 'numeric' })
+      const fmtShort = v => '$' + (v >= 1000 ? (v / 1000).toFixed(1) + 'k' : v.toFixed(0))
+      let fmtXLabel
+      if (period === '24h')             fmtXLabel = dt => `${dt.getHours()}h`
+      else if (period==='7d'||period==='1w') fmtXLabel = dt => dt.toLocaleDateString('fr-FR', { weekday: 'short' }).replace('.', '')
+      else                              fmtXLabel = dt => dt.toLocaleDateString('fr-FR', { day: 'numeric', month: 'short' })
+
+      const statFans   = Math.floor(gross / (8 + rng0() * 12))
+      const statNew    = Math.floor(statFans * (0.08 + rng0() * 0.12))
+      const statRenew  = Math.floor(72 + rng0() * 22)
+      const statNewPct = Math.floor(8 + rng0() * 24)
+      const txnDates   = [1, 3, 5, 7].map(d => {
+        const dt = new Date(pEnd.getTime() - d * 86400000)
+        return dt.toLocaleDateString('fr-FR', { day: '2-digit', month: 'short', year: 'numeric' })
+      })
+      const txnAmts = [
+        fmtUSD(gross * (0.03 + rng0() * 0.04)),
+        fmtUSD(gross * (0.01 + rng0() * 0.02)),
+        fmtUSD(gross * (0.02 + rng0() * 0.03)),
+        `-${fmtUSD(gross * (0.55 + rng0() * 0.15))}`,
+      ]
+      const dateLabels = Array.from({ length: 5 }, (_, i) => {
+        const t  = i / 4
+        const dt = new Date(pStart.getTime() + t * (pEnd.getTime() - pStart.getTime()))
+        return fmtXLabel(dt)
+      })
+      const periodLabel = period==='24h'?'24 heures':period==='7d'?'7 jours':period==='1w'?'1 semaine':'30 jours'
+      const cData  = dashOrganic(gross, bars, gross)
+      const cData2 = dashOrganic(gross * 0.12, bars, gross + 1)
+
+      svgStr = buildDashSvg(tpl, {
+        accent, isInflow, gross, net,
+        curBal:  fmtUSD(curBal),
+        pendBal: fmtUSD(pendBal),
+        growthPct, statFans, statNew, statRenew, statNewPct,
+        statAvg: fmtShort(gross / Math.max(statFans, 1)),
+        txnDates, txnAmts, dateLabels, periodLabel,
+        dateRange: `${fmtDate(pStart)} – ${fmtDate(pEnd)}`,
+        cData, cData2, bars,
+      })
+    }
 
     const pngBuf = await sharp(Buffer.from(svgStr)).png().toBuffer()
     res.json({ image: `data:image/png;base64,${pngBuf.toString('base64')}` })
