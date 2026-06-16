@@ -1597,101 +1597,10 @@ app.post('/retouch/remove-text', uploadLimiter, uploadMem.single('image'), async
 
 // ─── DASHBOARD IMAGE GENERATION ─────────────────────────────────────────────
 
-const DASH_ACCENT = {
-  OF: '#00aff0', Fanfix: '#a855f7', Fanvue: '#14b8a6', Reveal: '#f97316'
-}
-
-const DASH_CFG = {
-  OF: {
-    navBg:'#000', brand:'#00aff0', brandName:'OnlyFans',
-    bodyBg:'#ffffff', textColor:'#111',
-    balBorderC:'#f2f2f2', balLabelC:'#aaa', balMutedC:'#bbb',
-    dividerC:'#f2f2f2', badgeBg:'rgba(0,179,116,0.1)', badgeC:'#00b374',
-    statBg:'#fafafa', statBorderC:'#f0f0f0', deltaC:'#00b374', txnBorderC:'#f5f5f5',
-    pageTitle:'Statements',
-    navItems:[{t:'Accueil'},{t:'Messages'},{t:'Statements',active:true},{t:'Paramètres'}],
-    statTitle:'Top stats', txnTitle:'Dernières transactions',
-    txnTypes:['Abonnement','Pourboire','Message payant','Retrait'],
-    balLabel1:'Current balance', balSub1:'Available for payout',
-    balLabel2:'Pending balance', balSub2:'Clears in 3–7 days',
-    statL1:'Abonnés actifs', statL2:'Nouveaux abonnés',
-    statL3:'Taux renouvellement', statL4:'Transaction moy.',
-    statD3:'Période en cours', statD4:'Par abonné',
-    earnSub: (g, fmt) => `Net earnings  ·  gross: ${fmt(g)}`,
-  },
-  Fanfix: {
-    navBg:'#1a0535', brand:'#a855f7', brandName:'Fanfix',
-    bodyBg:'#fafafa', textColor:'#111',
-    balBorderC:'#ede0ff', balLabelC:'#c084fc', balMutedC:'#c084fc',
-    dividerC:'#f0e8ff', badgeBg:'rgba(168,85,247,0.12)', badgeC:'#a855f7',
-    statBg:'#fff', statBorderC:'#f0e8ff', deltaC:'#a855f7', txnBorderC:'#f5f0ff',
-    pageTitle:'Earnings Overview',
-    navItems:[{t:'Home'},{t:'Messages'},{t:'Earnings',active:true},{t:'Profile'}],
-    statTitle:'Analytics', txnTitle:'Transactions récentes',
-    txnTypes:['Abonnement mensuel','Pourboire','Contenu exclusif','Payout'],
-    balLabel1:'Current balance', balSub1:'Ready for withdrawal',
-    balLabel2:'Pending balance', balSub2:'In review',
-    statL1:'Supporters actifs', statL2:'Nouveaux supporters',
-    statL3:'Taux de rétention', statL4:'Revenu moyen',
-    statD3:'Période en cours', statD4:'Par supporter',
-    earnSub: (g, fmt) => `Net earnings  ·  gross: ${fmt(g)}`,
-  },
-  Fanvue: {
-    navBg:'#fff', brand:'#14b8a6', brandName:'Fanvue', navBorder:'#d0f0ec',
-    bodyBg:'#f5fffe', textColor:'#0d2926',
-    balBorderC:'#d0f0ec', balLabelC:'#14b8a6', balMutedC:'#a0d4cf',
-    dividerC:'#e0f7f4', badgeBg:'rgba(20,184,166,0.12)', badgeC:'#14b8a6',
-    statBg:'#fff', statBorderC:'#d0f0ec', deltaC:'#14b8a6', txnBorderC:'#e8f7f5',
-    pageTitle:'Earnings',
-    navItems:[{t:'Home'},{t:'Messages'},{t:'Earnings',active:true},{t:'Profile'}],
-    statTitle:'Performance', txnTitle:'Dernières transactions',
-    txnTypes:['Abonnement','Tip','Contenu PPV','Retrait'],
-    balLabel1:'Current balance', balSub1:'Available to withdraw',
-    balLabel2:'Pending balance', balSub2:'Processing',
-    statL1:'Fans actifs', statL2:'Nouveaux fans',
-    statL3:'Fidélisation', statL4:'Revenu / fan',
-    statD3:'Période en cours', statD4:'Moyenne mensuelle',
-    earnSub: (g, fmt) => `Net earnings  ·  gross: ${fmt(g)}`,
-  },
-  Reveal: {
-    navBg:'#1a0e00', brand:'#f97316', brandName:'Inflow',
-    bodyBg:'#fffaf5', textColor:'#1a0e00',
-    balBorderC:'#ffe8d4', balLabelC:'#f97316', balMutedC:'#fbb88e',
-    dividerC:'#ffe8d4', badgeBg:'rgba(249,115,22,0.12)', badgeC:'#f97316',
-    statBg:'#fff', statBorderC:'#ffe8d4', deltaC:'#f97316', txnBorderC:'#fff3eb',
-    pageTitle:'Revenus',
-    navItems:[{t:'Dashboard'},{t:'Conversions'},{t:'Revenus',active:true},{t:'Paramètres'}],
-    statTitle:'Indicateurs clés', txnTitle:'Transactions récentes',
-    txnTypes:['Vente directe','Abonnement','Commission','Payout'],
-    balLabel1:'Solde disponible', balSub1:'Prêt pour retrait',
-    balLabel2:'En attente', balSub2:'En traitement',
-    statL1:'Conversions actives', statL2:'Nouvelles conversions',
-    statL3:'Taux de conversion', statL4:'Panier moyen',
-    statD3:'Période en cours', statD4:'Par conversion',
-    earnSub: () => 'Montant brut total de la période',
-  },
-}
-
 // Seeded LCG — same gross always produces the same chart shape
 function seededRng(seed) {
   let s = (Math.abs(Math.round(seed)) || 1) & 0x7fffffff
   return () => { s = (s * 1664525 + 1013904223) >>> 0; return s / 0x100000000 }
-}
-
-// Peak = gross; for non-OF templates
-function dashOrganic(gross, n, seed) {
-  const rng = seededRng(seed !== undefined ? seed : gross)
-  const pts = []
-  for (let i = 0; i < n; i++) {
-    const wkBoost = (i % 7) >= 5 ? 1.12 : 1.0
-    const trend   = 0.88 + 0.12 * (i / Math.max(n - 1, 1))
-    const base    = (0.60 + rng() * 0.35) * wkBoost * trend
-    pts.push(Math.max(0.01, base * (1 + (rng() - 0.5) * 0.07)))
-  }
-  const mx = Math.max(...pts)
-  const scaled = pts.map(v => (v / mx) * gross)
-  scaled[scaled.indexOf(Math.max(...scaled))] = gross
-  return scaled
 }
 
 // Daily values that SUM to total (OF template: chart shows daily amounts)
@@ -1977,173 +1886,463 @@ function buildOFSvg(d) {
     b + `</svg>`
 }
 
-// ─── GENERIC DASHBOARD SVG (Fanfix / Fanvue / Reveal) ────────────────────────
-function buildDashSvg(tpl, d) {
-  const c = DASH_CFG[tpl] || DASH_CFG.OF
-  const accent = d.accent
-  const W = 768, PAD = 24
-  const fmtUSD = v => '$' + v.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
+// ─── FANFIX: Content Protection dashboard (2000×1221) ───────────────────────
+function buildFanfixSvg(d) {
+  const { revenueAmt, periodLabel, dateLabels } = d
+  const W = 1000, H = 610.5, SCALE = 2
 
-  const R = (x, y, w, h, fill, rx=0, stroke='none', sw=0) =>
+  const PINK = '#ec4899', PINK_BG = '#f9a8d4', LPUR = '#a78bfa', DPUR = '#7c3aed'
+  const BLK = '#0a0a0a', GRAY = '#8a8a8a'
+
+  const R = (x, y, w, h, fill, rx = 0, stroke = 'none', sw = 0) =>
     `<rect x="${x}" y="${y}" width="${w}" height="${h}" fill="${fill}" rx="${rx}"` +
     (stroke !== 'none' ? ` stroke="${stroke}" stroke-width="${sw}"` : '') + '/>'
-  const T = (x, y, s, { fs=14, fill='#111', fw='normal', anchor='start' }={}) =>
-    `<text x="${x}" y="${y}" font-family="Liberation Sans,Arial,sans-serif" font-size="${fs}" fill="${fill}" font-weight="${fw}" text-anchor="${anchor}">${escXml(String(s))}</text>`
-  const L = (x1, y1, x2, y2, stroke, sw=1) =>
+  const T = (x, y, s, { fs = 11, fill = BLK, fw = 'normal', anchor = 'start', ls = '0', deco = 'none' } = {}) =>
+    `<text x="${x}" y="${y}" font-family="Liberation Sans,Arial,sans-serif" font-size="${fs}" fill="${fill}" font-weight="${fw}" text-anchor="${anchor}" letter-spacing="${ls}" text-decoration="${deco}">${escXml(String(s))}</text>`
+  const L = (x1, y1, x2, y2, stroke, sw = 1) =>
     `<line x1="${x1}" y1="${y1}" x2="${x2}" y2="${y2}" stroke="${stroke}" stroke-width="${sw}"/>`
+  const Crc = (cx, cy, r, fill) => `<circle cx="${cx}" cy="${cy}" r="${r}" fill="${fill}"/>`
 
-  let b = '', y = 0
+  let b = ''
+  b += `<defs>
+    <linearGradient id="ffBg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#dce9fb"/><stop offset="50%" stop-color="#ece3f6"/><stop offset="100%" stop-color="#fbe1ee"/>
+    </linearGradient>
+    <radialGradient id="ffAvatar" cx="35%" cy="35%" r="75%">
+      <stop offset="0%" stop-color="#f9a8d4"/><stop offset="50%" stop-color="#a78bfa"/><stop offset="100%" stop-color="#7c3aed"/>
+    </radialGradient>
+  </defs>`
+  b += R(0, 0, W, H, 'url(#ffBg)')
 
-  // NAV
-  b += R(0, 0, W, 54, c.navBg)
-  if (c.navBorder) b += L(0, 53.5, W, 53.5, c.navBorder, 1.5)
-  b += T(PAD, 35, c.brandName, { fs:19, fill:c.brand, fw:'700' })
-  let nx = PAD + c.brandName.length * 11 + 32
-  c.navItems.forEach(item => {
-    const fill = item.active
-      ? (c.navBg === '#fff' ? c.brand : '#fff')
-      : (c.navBg === '#fff' ? '#999' : 'rgba(255,255,255,0.4)')
-    b += T(nx, 35, item.t, { fs:12, fill })
-    nx += item.t.length * 7.5 + 28
-  })
-  y = 54
+  // ── SIDEBAR ──
+  const SBW = 108
+  b += R(0, 0, SBW, H, '#ffffff')
+  b += Crc(20, 20, 9, 'url(#ffAvatar)')
+  b += `<path d="M16,20 L19,23 L25,16" fill="none" stroke="#fff" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>`
+  b += T(34, 24, 'FANFIX', { fs: 12.5, fw: '800', ls: '0.3' })
 
-  // PAGE TITLE
-  y += 30
-  b += T(PAD, y + 22, c.pageTitle, { fs:22, fill:c.textColor, fw:'700' })
-  y += 52
+  b += Crc(28, 68, 18, 'url(#ffAvatar)')
+  b += T(56, 64, 'Hi, john', { fs: 11.5, fw: '700' })
+  b += T(56, 79, 'Share profile', { fs: 9.5, fill: '#9b8afb', deco: 'underline' })
+  b += T(101, 79, '↗', { fs: 9.5, fill: '#9b8afb' })
 
-  // BALANCE ROW
-  const BAL_H = 108
-  b += R(PAD, y, W - PAD*2, BAL_H, '#fff', 14, c.balBorderC, 1.5)
-  const midX = PAD + (W - PAD*2) / 2
-  b += T(PAD+20, y+31, c.balLabel1, { fs:11, fill:c.balLabelC, fw:'600' })
-  b += T(PAD+20, y+73, d.curBal, { fs:32, fill:c.textColor, fw:'700' })
-  b += T(PAD+20, y+91, c.balSub1, { fs:11, fill:'#bbb' })
-  b += L(midX, y+16, midX, y+BAL_H-16, c.balBorderC, 1.5)
-  b += T(midX+20, y+31, c.balLabel2, { fs:11, fill:c.balLabelC, fw:'600' })
-  b += T(midX+20, y+66, d.pendBal, { fs:26, fill:c.balMutedC, fw:'700' })
-  b += T(midX+20, y+84, c.balSub2, { fs:11, fill:'#bbb' })
-  y += BAL_H + 22
+  b += R(14, 98, 80, 26, '#0a0a0a', 13)
+  b += T(54, 115, '+ Create', { fs: 11, fill: '#fff', fw: '600', anchor: 'middle' })
 
-  // PERIOD
-  b += T(PAD, y+15, d.periodLabel, { fs:15, fill:c.textColor, fw:'700' })
-  y += 18
-  b += T(PAD, y+12, d.dateRange, { fs:12, fill:'#999' })
-  y += 34
-  b += L(PAD, y, W-PAD, y, c.dividerC, 1.5)
-  y += 22
-
-  // EARNINGS
-  const earnAmt = d.isInflow ? fmtUSD(d.gross) : fmtUSD(d.net)
-  b += T(PAD, y+28, earnAmt, { fs:28, fill:c.textColor, fw:'700' })
-  b += T(PAD, y+46, c.earnSub(d.gross, fmtUSD), { fs:12, fill:'#999' })
-  const badgeTxt = `+${d.growthPct}%`
-  const badgeW = badgeTxt.length * 9 + 20
-  b += R(W-PAD-badgeW, y+4, badgeW, 26, c.badgeBg, 13)
-  b += T(W-PAD-badgeW/2, y+21, badgeTxt, { fs:13, fill:c.badgeC, fw:'600', anchor:'middle' })
-  y += 64
-
-  // MAIN CHART
-  const CH = 260, PL = 54, PR = 16, PT = 18, PB = 28
-  const PW = W - PL - PR, PH = CH - PT - PB
-  const cy = y
-  b += R(0, cy, W, CH, '#fff')
-  for (let i = 0; i <= 4; i++) {
-    const v  = d.gross * (1 - i/4)
-    const gy = cy + PT + PH * i / 4
-    const lbl = v >= 1000 ? `$${Math.round(v/1000)}k` : `$${Math.round(v)}`
-    b += L(PL, gy, W-PR, gy, '#f0f0f0', 1)
-    b += T(PL-5, gy+4, lbl, { fs:10, fill:'#ccc', anchor:'end' })
-  }
-  const cPts = d.cData.map((v, i) => ({
-    x: PL + (d.bars > 1 ? i/(d.bars-1) : 0) * PW,
-    y: cy + PT + (1 - v/d.gross) * PH
-  }))
-  const cLine = svgSmooth(cPts)
-  const cFill = cLine + ` L ${cPts[cPts.length-1].x.toFixed(1)} ${(cy+PT+PH).toFixed(1)} L ${PL} ${(cy+PT+PH).toFixed(1)} Z`
-  b += `<defs><linearGradient id="grad${tpl}" x1="0" y1="0" x2="0" y2="1">` +
-    `<stop offset="0%" stop-color="${accent}" stop-opacity="0.25"/>` +
-    `<stop offset="100%" stop-color="${accent}" stop-opacity="0.02"/>` +
-    `</linearGradient></defs>`
-  b += `<path d="${cFill}" fill="url(#grad${tpl})"/>`
-  b += `<path d="${cLine}" fill="none" stroke="${accent}" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>`
-  y = cy + CH
-
-  // SECONDARY CHART
-  const C2H = 72, C2L = 8, C2R = 8, C2T = 6, C2B = 6
-  const C2PW = W-C2L-C2R, C2PH = C2H-C2T-C2B
-  const maxV2 = Math.max(...d.cData2)
-  const c2y = y
-  b += R(0, c2y, W, C2H, '#fff')
-  const c2Pts = d.cData2.map((v, i) => ({
-    x: C2L + (d.bars > 1 ? i/(d.bars-1) : 0) * C2PW,
-    y: c2y + C2T + (1 - v/maxV2) * C2PH
-  }))
-  const c2Line = svgSmooth(c2Pts)
-  const c2Fill = c2Line + ` L ${c2Pts[c2Pts.length-1].x.toFixed(1)} ${(c2y+C2T+C2PH).toFixed(1)} L ${C2L} ${(c2y+C2T+C2PH).toFixed(1)} Z`
-  b += `<path d="${c2Fill}" fill="rgba(0,0,0,0.05)"/>`
-  b += `<path d="${c2Line}" fill="none" stroke="#ddd" stroke-width="1.5" stroke-linecap="round"/>`
-  y = c2y + C2H
-
-  // DATE AXIS
-  b += R(0, y, W, 32, '#fff')
-  b += L(PAD, y+31, W-PAD, y+31, c.dividerC, 1.5)
-  d.dateLabels.forEach((lbl, i) => {
-    const lx = PL + (d.dateLabels.length > 1 ? i/(d.dateLabels.length-1) : 0) * PW
-    b += T(lx, y+18, lbl, { fs:10.5, fill:'#bbb', anchor:'middle' })
-  })
-  y += 32
-
-  // STATS
-  y += 28
-  b += T(PAD, y+13, c.statTitle, { fs:13, fill:c.textColor, fw:'700' })
-  y += 29
-  const statW = (W - PAD*2 - 14) / 2
-  const STAT_H = 82
-  const statRows = [
-    [c.statL1, d.statFans,        `↑ ${d.growthPct}% ce mois`],
-    [c.statL2, d.statNew,         `↑ ${d.statNewPct}% vs précédent`],
-    [c.statL3, `${d.statRenew}%`, c.statD3],
-    [c.statL4, d.statAvg,         c.statD4],
+  const menu = [
+    { t: 'Insights' }, { t: 'Analytics', chev: true }, { t: 'Messages', badge: '3', badgeC: '#3b82f6' },
+    { t: 'Memberships', chev: true }, { t: 'Notifications', badge: '7', badgeC: '#7c3aed' },
+    { t: 'Vault' }, { t: 'Scheduler' }, { t: 'Community', chev: true },
   ]
-  statRows.forEach((row, i) => {
-    const col = i % 2, rowIdx = Math.floor(i/2)
-    const sx = PAD + col * (statW + 14)
-    const sy = y + rowIdx * (STAT_H + 14)
-    b += R(sx, sy, statW, STAT_H, c.statBg, 10, c.statBorderC, 1.5)
-    b += T(sx+16, sy+27, row[0], { fs:11, fill:'#999' })
-    b += T(sx+16, sy+55, String(row[1]), { fs:22, fill:c.textColor, fw:'700' })
-    b += T(sx+16, sy+71, row[2], { fs:11, fill:c.deltaC })
+  let my = 145
+  menu.forEach(m => {
+    b += `<circle cx="22" cy="${my - 4}" r="6" fill="none" stroke="#999" stroke-width="1.3"/>`
+    b += T(36, my, m.t, { fs: 10.8, fill: '#333' })
+    if (m.chev) b += T(96, my, '›', { fs: 11, fill: '#bbb', anchor: 'middle' })
+    if (m.badge) { b += Crc(94, my - 4, 7, m.badgeC); b += T(94, my - 1, m.badge, { fs: 8.5, fill: '#fff', fw: '700', anchor: 'middle' }) }
+    my += 25
   })
-  y += 2*(STAT_H+14) - 14 + 30
-
-  // TRANSACTIONS
-  b += T(PAD, y+13, c.txnTitle, { fs:13, fill:c.textColor, fw:'700' })
-  y += 27
-  c.txnTypes.forEach((type, i) => {
-    b += L(PAD, y, W-PAD, y, c.txnBorderC, 1)
-    b += T(PAD, y+16, type, { fs:13, fill:'#444' })
-    b += T(PAD, y+31, d.txnDates[i], { fs:11, fill:'#bbb' })
-    const isNeg = String(d.txnAmts[i]).startsWith('-')
-    b += T(W-PAD, y+22, d.txnAmts[i], { fs:14, fill:isNeg?'#f43f5e':c.textColor, fw:'600', anchor:'end' })
-    y += 42
+  my += 14
+  ;['Settings', 'Contact Us', 'Sign Out'].forEach((t, i) => {
+    b += T(36, my, t, { fs: 10.5, fill: '#666' })
+    if (i === 0) b += T(96, my, '›', { fs: 11, fill: '#bbb', anchor: 'middle' })
+    my += 24
   })
-  y += 30
+  b += L(14, H - 40, SBW - 14, H - 40, '#eee', 1)
+  b += T(36, H - 18, 'Hide menu', { fs: 10, fill: '#999' })
 
-  return `<svg width="${W}" height="${y}" xmlns="http://www.w3.org/2000/svg">` +
-    `<rect width="${W}" height="${y}" fill="${c.bodyBg}"/>` +
-    b + `</svg>`
+  // ── MAIN CONTENT ──
+  const MX = 132
+  b += T(MX, 46, 'Content Protection', { fs: 23, fw: '800' })
+  b += T(MX, 64, "World's most powerful AI powered detection and removal!", { fs: 11.5, fill: GRAY })
+
+  const tabs = ['Dashboard', 'Reported Links', 'Whitelist', 'AI Scan Detection', 'Reddit Scan', 'Settings']
+  let tx = MX
+  tabs.forEach((t, i) => {
+    b += T(tx, 96, t, { fs: 11.5, fill: i === 0 ? BLK : '#999', fw: i === 0 ? '700' : '400' })
+    if (i === 0) b += L(tx, 104, tx + t.length * 6.6, 104, BLK, 1.6)
+    tx += t.length * 6.6 + 26
+  })
+  b += R(860, 78, 108, 28, '#6d4aff', 14)
+  b += T(914, 96, 'Report Links', { fs: 10.8, fill: '#fff', fw: '600', anchor: 'middle' })
+
+  // ── Scan Detections card ──
+  const SC_X = MX, SC_Y = 122, SC_W = 478, SC_H = 218
+  b += R(SC_X, SC_Y, SC_W, SC_H, '#fdfbff', 12, '#f0e8fc', 1)
+  b += T(SC_X + 18, SC_Y + 24, 'Scan Detections', { fs: 13.5, fw: '700' })
+  b += T(SC_X + 18, SC_Y + 40, 'Results Detected Over Time', { fs: 10.5, fill: GRAY })
+  b += R(SC_X + SC_W - 92, SC_Y + 14, 78, 20, '#ffffff', 10, '#e8dffb', 1)
+  b += T(SC_X + SC_W - 53, SC_Y + 27, periodLabel, { fs: 9.5, fill: '#666', anchor: 'middle' })
+
+  const chX = SC_X + 14, chW = SC_W - 28, chY = SC_Y + 56, chH = SC_H - 74
+  const wave = (baseFrac, ampFrac, phase) => {
+    const pts = []
+    for (let i = 0; i <= 5; i++) {
+      const t = i / 5
+      const v = baseFrac + ampFrac * Math.sin(t * Math.PI * 1.6 + phase)
+      pts.push({ x: chX + t * chW, y: chY + chH * (1 - v) })
+    }
+    return pts
+  }
+  const layer = (pts, fill) => {
+    const dd = svgSmooth(pts) + ` L ${pts[pts.length - 1].x.toFixed(1)} ${(chY + chH).toFixed(1)} L ${pts[0].x.toFixed(1)} ${(chY + chH).toFixed(1)} Z`
+    return `<path d="${dd}" fill="${fill}" opacity="0.85"/>`
+  }
+  b += layer(wave(0.62, 0.14, 0.6), PINK_BG)
+  b += layer(wave(0.44, 0.16, 2.4), LPUR)
+  b += layer(wave(0.26, 0.13, 4.1), DPUR)
+  dateLabels.forEach((lbl, i) => {
+    const lx = chX + (dateLabels.length > 1 ? i / (dateLabels.length - 1) : 0) * chW
+    b += T(lx, SC_Y + SC_H - 10, lbl, { fs: 9.5, fill: '#aaa', anchor: i === 0 ? 'start' : i === dateLabels.length - 1 ? 'end' : 'middle' })
+  })
+
+  const stats = [{ n: '9', l: 'Google Results', c: PINK }, { n: '7', l: 'Reddit Detection', c: LPUR }, { n: '6', l: 'Google Images', c: DPUR }]
+  let sy = SC_Y
+  stats.forEach(s => {
+    b += R(626, sy, 140, 66, s.c, 10)
+    b += T(642, sy + 30, s.n, { fs: 18, fill: '#fff', fw: '800' })
+    b += T(642, sy + 48, s.l, { fs: 10, fill: 'rgba(255,255,255,0.92)' })
+    sy += 76
+  })
+
+  // ── ROW 2: 3 cards (equal width, aligned to row1 width) ──
+  const R2Y = 360, R2H = 200, CW = 201, GAP = 16
+  const AX = MX, BX = AX + CW + GAP, CX2 = BX + CW + GAP
+
+  // Card A: Top 3 Infringers
+  b += R(AX, R2Y, CW, R2H, '#ffffff', 12, '#f0eaf9', 1)
+  b += T(AX + 16, R2Y + 24, 'Top 3 Infringers', { fs: 12, fw: '700' })
+  b += T(AX + CW - 14, R2Y + 24, 'Last 30 days', { fs: 8.5, fill: '#aaa', anchor: 'end' })
+  const dcx = AX + CW / 2, dcy = R2Y + 96, ro = 42, ri = 26
+  let ang = -Math.PI / 2
+  ;[{ frac: 0.5, c: PINK }, { frac: 0.15, c: LPUR }, { frac: 0.35, c: DPUR }].forEach(a => {
+    const a0 = ang, a1 = ang + a.frac * 2 * Math.PI
+    const x0o = dcx + ro * Math.cos(a0), y0o = dcy + ro * Math.sin(a0)
+    const x1o = dcx + ro * Math.cos(a1), y1o = dcy + ro * Math.sin(a1)
+    const x1i = dcx + ri * Math.cos(a1), y1i = dcy + ri * Math.sin(a1)
+    const x0i = dcx + ri * Math.cos(a0), y0i = dcy + ri * Math.sin(a0)
+    const large = a.frac > 0.5 ? 1 : 0
+    b += `<path d="M${x0o.toFixed(1)},${y0o.toFixed(1)} A${ro},${ro} 0 ${large} 1 ${x1o.toFixed(1)},${y1o.toFixed(1)} L${x1i.toFixed(1)},${y1i.toFixed(1)} A${ri},${ri} 0 ${large} 0 ${x0i.toFixed(1)},${y0i.toFixed(1)} Z" fill="${a.c}"/>`
+    ang = a1
+  })
+  b += T(dcx, dcy + 7, '17', { fs: 20, fw: '800', anchor: 'middle' })
+  let lx2 = AX + 14
+  ;[{ t: 'reddit.com', c: PINK }, { t: 'instagram.com', c: LPUR }, { t: 'tiktok.com', c: DPUR }].forEach(lg => {
+    b += Crc(lx2, R2Y + R2H - 14, 3, lg.c)
+    b += T(lx2 + 8, R2Y + R2H - 11, lg.t, { fs: 8.3, fill: '#777' })
+    lx2 += lg.t.length * 5 + 18
+  })
+
+  // Card B: Potential Revenue Saved (DYNAMIC)
+  b += R(BX, R2Y, CW, R2H, '#ffffff', 12, '#f0eaf9', 1)
+  b += T(BX + 16, R2Y + 24, 'Potential Revenue', { fs: 11.5, fw: '700' })
+  b += T(BX + 16, R2Y + 38, 'Saved', { fs: 11.5, fw: '700' })
+  b += T(BX + CW - 14, R2Y + 24, `Total: ${revenueAmt}`, { fs: 8.5, fill: '#aaa', anchor: 'end' })
+  const days = ['Thu', 'Fri', 'Sat', 'Sun', 'Mon', 'Tue', 'Wed']
+  const barBaseY = R2Y + R2H - 26, barMaxH = 96, bw2 = 14, gap2 = 12
+  let bx2 = BX + 18
+  days.forEach((day, i) => {
+    const isPeak = i === 2
+    const h2 = isPeak ? barMaxH : 2
+    b += R(bx2, barBaseY - h2, bw2, h2, isPeak ? DPUR : '#eee', 2)
+    b += T(bx2 + bw2 / 2, barBaseY - h2 - 6, isPeak ? revenueAmt : '$0', { fs: 7.6, fill: isPeak ? '#333' : '#bbb', anchor: 'middle' })
+    b += T(bx2 + bw2 / 2, barBaseY + 12, day, { fs: 8, fill: '#999', anchor: 'middle' })
+    bx2 += bw2 + gap2
+  })
+
+  // Card C: Recently Detected URLs
+  b += R(CX2, R2Y, CW, R2H, '#ffffff', 12, '#f0eaf9', 1)
+  b += T(CX2 + 16, R2Y + 24, 'Recently Detected URLs', { fs: 11.5, fw: '700' })
+  const urls = ['https://www.twitter.com/ac…', 'https://images.google.com/…', 'https://www.tiktok.com/@ac…', 'https://images.google.com/…', 'https://images.google.com/…']
+  let uy = R2Y + 50
+  urls.forEach(u => { b += T(CX2 + 16, uy, u, { fs: 9.5, fill: DPUR }); uy += 27 })
+
+  b += T(W - 40, H - 16, '© Powered by Takedowns AI', { fs: 9, fill: '#999', anchor: 'end' })
+
+  return `<svg width="${W * SCALE}" height="${H * SCALE}" viewBox="0 0 ${W} ${H}" xmlns="http://www.w3.org/2000/svg">${b}</svg>`
 }
+
+// ─── FANVUE: dark mobile Insights screenshot (359×764) ──────────────────────
+function buildFanvueSvg(d) {
+  const { earningsAmt, monthAmt, monthLabel, periodLabel, dateRange,
+          totalAmt, totalDelta, subsAmt, subsDelta, chartStart, chartEnd } = d
+  const W = 359, H = 764
+  const GRN = '#22e584', WHT = '#ffffff', GRAY = '#8a8a8a', CARD = '#161616', BORDER = '#262626'
+
+  const R = (x, y, w, h, fill, rx = 0, stroke = 'none', sw = 0) =>
+    `<rect x="${x}" y="${y}" width="${w}" height="${h}" fill="${fill}" rx="${rx}"` +
+    (stroke !== 'none' ? ` stroke="${stroke}" stroke-width="${sw}"` : '') + '/>'
+  const T = (x, y, s, { fs = 11, fill = WHT, fw = 'normal', anchor = 'start', ls = '0' } = {}) =>
+    `<text x="${x}" y="${y}" font-family="Liberation Sans,Arial,sans-serif" font-size="${fs}" fill="${fill}" font-weight="${fw}" text-anchor="${anchor}" letter-spacing="${ls}">${escXml(String(s))}</text>`
+  const L = (x1, y1, x2, y2, stroke, sw = 1, dash = '') =>
+    `<line x1="${x1}" y1="${y1}" x2="${x2}" y2="${y2}" stroke="${stroke}" stroke-width="${sw}"` + (dash ? ` stroke-dasharray="${dash}"` : '') + '/>'
+  const Crc = (cx, cy, r, fill, stroke = 'none', sw = 0) =>
+    `<circle cx="${cx}" cy="${cy}" r="${r}" fill="${fill}"` + (stroke !== 'none' ? ` stroke="${stroke}" stroke-width="${sw}"` : '') + '/>'
+
+  let b = ''
+  b += `<defs><filter id="fvGlow" x="-50%" y="-50%" width="200%" height="200%"><feGaussianBlur stdDeviation="2" result="blur"/><feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge></filter></defs>`
+  b += R(0, 0, W, H, '#0a0a0a')
+
+  // status bar
+  b += T(16, 20, '9:41', { fs: 11, fw: '600' })
+  ;[0, 1, 2, 3].forEach(i => b += R(300 + i * 7, 17 - i * 2.2, 4, 8 + i * 2.2, WHT, 1))
+  b += `<path d="M333,21 A9,9 0 0 1 351,21" fill="none" stroke="${WHT}" stroke-width="1.6"/>`
+  b += R(340, 11, 15, 8, 'none', 2, WHT, 1.4)
+  b += R(342, 13, 10, 4, WHT, 1)
+
+  // header
+  b += T(16, 52, 'INSIGHTS', { fs: 18, fw: '800', ls: '0.3' })
+  b += T(343, 50, 'GMT +01', { fs: 9, fill: GRAY, anchor: 'end' })
+
+  // tabs
+  const tabs = ['Earnings', 'Subscribers', 'Monthly Earnings', 'C']
+  let tx = 16
+  tabs.forEach((t, i) => {
+    b += T(tx, 80, t, { fs: 11.5, fill: i === 0 ? WHT : GRAY, fw: i === 0 ? '700' : '400' })
+    if (i === 0) b += L(tx, 88, tx + t.length * 6.6, 88, GRN, 2)
+    tx += t.length * 6.6 + 18
+  })
+
+  // period pills
+  b += R(16, 100, 98, 24, '#1c1c1c', 12, BORDER, 1)
+  b += T(65, 116, `${periodLabel} ⌄`, { fs: 9.5, fill: '#ddd', anchor: 'middle' })
+  b += R(122, 100, 210, 24, '#1c1c1c', 12, BORDER, 1)
+  b += T(134, 116, `📅 ${dateRange}`, { fs: 9, fill: '#ddd' })
+
+  // cards (card2 deliberately overflows the canvas edge, matching the scrolled-carousel reference)
+  const cardY = 140, cardH = 120, cW = 210
+  const spark = (x0, y0, w, h, ph) => {
+    const pts = []
+    for (let i = 0; i <= 12; i++) {
+      const t = i / 12
+      const v = 0.5 + 0.28 * Math.sin(t * 7 + ph) + 0.12 * Math.sin(t * 13 + ph * 2)
+      pts.push({ x: x0 + t * w, y: y0 + h * (1 - Math.max(0.05, Math.min(0.95, v))) })
+    }
+    return svgSmooth(pts)
+  }
+  const c1X = 16
+  b += R(c1X, cardY, cW, cardH, CARD, 14)
+  b += T(c1X + 16, cardY + 24, 'Earnings', { fs: 10.5, fill: GRAY })
+  b += `<circle cx="${c1X + 72}" cy="${cardY + 20}" r="6" fill="none" stroke="${GRAY}" stroke-width="1.2"/><text x="${c1X + 72}" y="${cardY + 23}" font-size="8" fill="${GRAY}" text-anchor="middle">i</text>`
+  b += T(c1X + 16, cardY + 52, earningsAmt, { fs: 21, fw: '700' })
+  b += T(c1X + 16, cardY + 68, 'Since Aug 2024', { fs: 9, fill: GRAY })
+  b += `<path d="${spark(c1X + 16, cardY + 78, cW - 32, 30, 0.4)}" fill="none" stroke="${GRN}" stroke-width="1.6" filter="url(#fvGlow)"/>`
+
+  const c2X = 234
+  b += R(c2X, cardY, cW, cardH, CARD, 14)
+  b += T(c2X + 16, cardY + 24, 'This month', { fs: 10.5, fill: GRAY })
+  b += T(c2X + 16, cardY + 52, monthAmt, { fs: 21, fw: '700' })
+  b += T(c2X + 16, cardY + 68, monthLabel, { fs: 9, fill: GRAY })
+  b += `<path d="${spark(c2X + 16, cardY + 78, cW - 32, 30, 2.1)}" fill="none" stroke="${GRN}" stroke-width="1.6" filter="url(#fvGlow)"/>`
+
+  // earnings over time
+  const eoY = 292
+  b += T(16, eoY, 'Earnings over time', { fs: 14, fw: '700' })
+  b += R(255, eoY - 16, 44, 22, GRN, 11)
+  b += T(277, eoY - 1, 'Net', { fs: 9.5, fill: '#062b16', fw: '700', anchor: 'middle' })
+  b += R(301, eoY - 16, 42, 22, '#1c1c1c', 11, BORDER, 1)
+  b += T(322, eoY - 1, 'Gross', { fs: 9.5, fill: GRAY, anchor: 'middle' })
+
+  const chX = 16, chY = eoY + 30, chW = 327, chH = 130
+  ;[0.25, 0.5, 0.75].forEach(f => b += L(chX, chY + chH * f, chX + chW, chY + chH * f, '#2a2a2a', 1, '3,4'))
+  const lines = [
+    { c: '#ffffff', base: 0.18, amp: 0.10, ph: 0.2, freq: 6 },
+    { c: '#7a2b2b', base: 0.46, amp: 0.08, ph: 1.1, freq: 7 },
+    { c: '#34d6c4', base: 0.52, amp: 0.09, ph: 2.0, freq: 5.5 },
+    { c: '#f5a623', base: 0.58, amp: 0.07, ph: 3.0, freq: 6.5 },
+    { c: '#4a7dff', base: 0.64, amp: 0.08, ph: 4.0, freq: 6 },
+    { c: '#c34ae0', base: 0.66, amp: 0.07, ph: 5.0, freq: 7.5 },
+  ]
+  lines.forEach(ln => {
+    const pts = []
+    for (let i = 0; i <= 40; i++) {
+      const t = i / 40
+      const v = ln.base - ln.amp * 0.5 + ln.amp * Math.sin(t * ln.freq + ln.ph) * 0.6 + ln.amp * 0.4 * Math.sin(t * ln.freq * 2.3 + ln.ph * 1.7)
+      pts.push({ x: chX + t * chW, y: chY + chH * Math.max(0.02, Math.min(0.98, v)) })
+    }
+    b += `<path d="${svgSmooth(pts)}" fill="none" stroke="${ln.c}" stroke-width="1.4" filter="url(#fvGlow)" opacity="0.95"/>`
+  })
+  b += T(chX, chY + chH + 18, chartStart, { fs: 9.5, fill: GRAY })
+  b += T(chX + chW, chY + chH + 18, chartEnd, { fs: 9.5, fill: GRAY, anchor: 'end' })
+  b += L(16, chY + chH + 30, 343, chY + chH + 30, BORDER, 1)
+
+  // summary rows
+  const rowY1 = chY + chH + 58, rowY2 = rowY1 + 38
+  b += Crc(22, rowY1 - 4, 4.5, '#8b5cf6')
+  b += T(34, rowY1, 'Total', { fs: 11.5 })
+  b += T(150, rowY1, totalAmt, { fs: 13, fw: '700' })
+  b += R(280, rowY1 - 15, 60, 22, 'rgba(34,229,132,0.15)', 11)
+  b += T(310, rowY1, totalDelta, { fs: 10, fill: GRN, fw: '600', anchor: 'middle' })
+
+  b += Crc(22, rowY2 - 4, 4.5, '#ffffff')
+  b += T(34, rowY2, 'Subs', { fs: 11.5 })
+  b += T(150, rowY2, subsAmt, { fs: 13, fw: '700' })
+  b += R(280, rowY2 - 15, 60, 22, 'rgba(34,229,132,0.15)', 11)
+  b += T(310, rowY2, subsDelta, { fs: 10, fill: GRN, fw: '600', anchor: 'middle' })
+
+  // bottom nav
+  const navY = H - 30
+  const icons = [36, 108, 180, 251, 323]
+  b += L(0, navY - 23, W, navY - 23, BORDER, 1)
+  b += `<path d="M${icons[0]-9},${navY-3} L${icons[0]},${navY-12} L${icons[0]+9},${navY-3}" fill="none" stroke="#ccc" stroke-width="1.6" stroke-linejoin="round"/>`
+  b += `<rect x="${icons[0]-6}" y="${navY-3}" width="12" height="11" fill="none" stroke="#ccc" stroke-width="1.6"/>`
+  b += `<path d="M${icons[1]},${navY-13} C${icons[1]-8},${navY-13} ${icons[1]-8},${navY-3} ${icons[1]-8},${navY} L${icons[1]+8},${navY} C${icons[1]+8},${navY-3} ${icons[1]+8},${navY-13} ${icons[1]},${navY-13}" fill="none" stroke="#ccc" stroke-width="1.6"/>`
+  b += `<circle cx="${icons[1]}" cy="${navY+4}" r="3" fill="none" stroke="#ccc" stroke-width="1.6"/>`
+  b += Crc(icons[2], navY - 5, 15, WHT)
+  b += L(icons[2] - 7, navY - 5, icons[2] + 7, navY - 5, '#0a0a0a', 2)
+  b += L(icons[2], navY - 12, icons[2], navY + 2, '#0a0a0a', 2)
+  b += `<path d="M${icons[3]-10},${navY-14} L${icons[3]+10},${navY-14} L${icons[3]+10},${navY-2} L${icons[3]+3},${navY-2} L${icons[3]},${navY+4} L${icons[3]-3},${navY-2} L${icons[3]-10},${navY-2} Z" fill="none" stroke="#ccc" stroke-width="1.6" stroke-linejoin="round"/>`
+  b += `<circle cx="${icons[4]}" cy="${navY-5}" r="15" fill="none" stroke="${GRN}" stroke-width="1.6"/>`
+  b += T(icons[4], navY - 1, 'FV', { fs: 9, fw: '700', anchor: 'middle' })
+
+  return `<svg width="${W}" height="${H}" xmlns="http://www.w3.org/2000/svg">${b}</svg>`
+}
+
+// ─── REVEAL/INFLOW: dark "Creator earnings overview" SaaS dashboard (1740×875)
+function buildRevealSvg(d) {
+  const { subsAmt, tipsAmt, postsAmt, referralsAmt, messagesAmt, streamsAmt, totalAmt,
+          activeTab, chartDates, bars } = d
+  const W = 870, H = 437.5, SCALE = 2
+  const BG = '#070708', PANEL = '#131316', BORDER = '#222226', GRAY = '#8a8a8e', BLUE = '#3b82f6'
+
+  const R = (x, y, w, h, fill, rx = 0, stroke = 'none', sw = 0) =>
+    `<rect x="${x}" y="${y}" width="${w}" height="${h}" fill="${fill}" rx="${rx}"` +
+    (stroke !== 'none' ? ` stroke="${stroke}" stroke-width="${sw}"` : '') + '/>'
+  const T = (x, y, s, { fs = 10, fill = '#ffffff', fw = 'normal', anchor = 'start', ls = '0' } = {}) =>
+    `<text x="${x}" y="${y}" font-family="Liberation Sans,Arial,sans-serif" font-size="${fs}" fill="${fill}" font-weight="${fw}" text-anchor="${anchor}" letter-spacing="${ls}">${escXml(String(s))}</text>`
+  const L = (x1, y1, x2, y2, stroke, sw = 1, dash = '') =>
+    `<line x1="${x1}" y1="${y1}" x2="${x2}" y2="${y2}" stroke="${stroke}" stroke-width="${sw}"` + (dash ? ` stroke-dasharray="${dash}"` : '') + '/>'
+  const Crc = (cx, cy, r, fill, stroke = 'none', sw = 0) =>
+    `<circle cx="${cx}" cy="${cy}" r="${r}" fill="${fill}"` + (stroke !== 'none' ? ` stroke="${stroke}" stroke-width="${sw}"` : '') + '/>'
+
+  const icon = (type, x, y) => {
+    const bg = { sub: '#103726', tip: '#0f2438', post: '#103726', ref: '#3a1320', msg: '#2a1240', stream: '#0f2438' }[type]
+    const st = { sub: '#22c55e', tip: '#60a5fa', post: '#22c55e', ref: '#f472b6', msg: '#a78bfa', stream: '#60a5fa' }[type]
+    let s = R(x, y, 26, 26, bg, 6)
+    const cx = x + 13, cy = y + 13
+    if (type === 'sub') s += `<rect x="${cx-5}" y="${cy-6}" width="10" height="12" rx="1.5" fill="none" stroke="${st}" stroke-width="1.3"/><line x1="${cx}" y1="${cy-1}" x2="${cx}" y2="${cy+3}" stroke="${st}" stroke-width="1.3"/><line x1="${cx-2}" y1="${cy+1}" x2="${cx+2}" y2="${cy+1}" stroke="${st}" stroke-width="1.3"/>`
+    else if (type === 'tip') s += `<circle cx="${cx}" cy="${cy-2}" r="5" fill="none" stroke="${st}" stroke-width="1.3"/><line x1="${cx-2}" y1="${cy+6}" x2="${cx+2}" y2="${cy+6}" stroke="${st}" stroke-width="1.3"/>`
+    else if (type === 'post') s += `<rect x="${cx-5}" y="${cy-6}" width="10" height="12" rx="1.5" fill="none" stroke="${st}" stroke-width="1.3"/><line x1="${cx-3}" y1="${cy-2}" x2="${cx+3}" y2="${cy-2}" stroke="${st}" stroke-width="1"/><line x1="${cx-3}" y1="${cy+1}" x2="${cx+3}" y2="${cy+1}" stroke="${st}" stroke-width="1"/>`
+    else if (type === 'ref') s += `<circle cx="${cx}" cy="${cy-3}" r="3.5" fill="none" stroke="${st}" stroke-width="1.3"/><path d="M${cx-6},${cy+7} C${cx-6},${cy+1} ${cx+6},${cy+1} ${cx+6},${cy+7}" fill="none" stroke="${st}" stroke-width="1.3"/>`
+    else if (type === 'msg') s += `<path d="M${cx-6},${cy-5} L${cx+6},${cy-5} L${cx+6},${cy+2} L${cx+1},${cy+2} L${cx-2},${cy+6} L${cx-2},${cy+2} L${cx-6},${cy+2} Z" fill="none" stroke="${st}" stroke-width="1.3" stroke-linejoin="round"/>`
+    else s += `<line x1="${cx-5}" y1="${cy+5}" x2="${cx-5}" y2="${cy-2}" stroke="${st}" stroke-width="1.6"/><line x1="${cx}" y1="${cy+5}" x2="${cx}" y2="${cy-6}" stroke="${st}" stroke-width="1.6"/><line x1="${cx+5}" y1="${cy+5}" x2="${cx+5}" y2="${cy-1}" stroke="${st}" stroke-width="1.6"/>`
+    return s
+  }
+  const metric = (x, y, amt, label, type) =>
+    T(x, y, amt, { fs: 13, fw: '700' }) + T(x, y + 14, label, { fs: 8.5, fill: GRAY }) + icon(type, x + 125, y - 19)
+
+  let b = ''
+  b += `<defs><radialGradient id="rvLogo" cx="35%" cy="30%" r="75%"><stop offset="0%" stop-color="#60a5fa"/><stop offset="100%" stop-color="#2563eb"/></radialGradient></defs>`
+  b += R(0, 0, W, H, BG)
+
+  // top bar
+  b += R(0, 0, W, 26, '#050505')
+  b += L(0, 26, W, 26, BORDER, 1)
+  ;[0, 1, 2].forEach(i => b += L(12, 9 + i * 4, 24, 9 + i * 4, '#999', 1.3))
+  b += Crc(40, 13, 9, 'url(#rvLogo)')
+  b += `<path d="M36,13 L39,16 L45,9" fill="none" stroke="#fff" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/>`
+  let hx = 432
+  b += Crc(hx, 13, 3, '#22c55e'); b += T(hx + 8, 16, 'Operational', { fs: 9, fill: '#22c55e' }); hx += 80
+  b += T(hx, 16, '◐ UTC+02:00', { fs: 9, fill: GRAY }); hx += 78
+  b += T(hx, 16, '⇄ Referrals', { fs: 9, fill: GRAY }); hx += 64
+  b += T(hx, 16, '🏆 Leaderboard', { fs: 9, fill: GRAY }); hx += 84
+  b += T(hx, 16, '🔔', { fs: 10, fill: GRAY })
+  b += R(hx + 6, 5, 22, 12, '#ec4899', 6); b += T(hx + 17, 14, '99+', { fs: 6.5, fill: '#fff', fw: '700', anchor: 'middle' }); hx += 40
+  b += Crc(hx + 6, 13, 9, '#444')
+
+  // header row
+  b += T(34, 50, 'Creator earnings overview', { fs: 13, fw: '700' })
+  b += `<circle cx="195" cy="46" r="6" fill="none" stroke="${GRAY}" stroke-width="1"/><text x="195" y="49" font-size="7" fill="${GRAY}" text-anchor="middle">i</text>`
+  b += T(211, 50, 'UTC+01:00', { fs: 9.5, fill: GRAY })
+  b += R(540, 38, 108, 18, '#171719', 9, BORDER, 1)
+  b += T(594, 50, 'Gross earnings ⌄', { fs: 8.5, fill: '#ccc', anchor: 'middle' })
+  const tabs = ['Yesterday', 'Today', 'This week', 'This month']
+  let tbx = 658
+  tabs.forEach(t => {
+    const tw = t.length * 5.6 + 16
+    const active = t === activeTab
+    if (active) b += R(tbx, 38, tw, 18, BLUE, 9)
+    b += T(tbx + tw / 2, 50, t, { fs: 8.5, fill: active ? '#fff' : GRAY, fw: active ? '600' : '400', anchor: 'middle' })
+    tbx += tw + 6
+  })
+
+  // main earnings card
+  const MC_Y = 68, MC_H = 128
+  b += R(34, MC_Y, 824, MC_H, PANEL, 10, BORDER, 1)
+  b += Crc(60, MC_Y + 34, 15, 'url(#rvLogo)')
+  b += `<path d="M54,${MC_Y+34} L58,${MC_Y+38} L67,${MC_Y+27}" fill="none" stroke="#fff" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>`
+  b += T(42, MC_Y + 72, totalAmt, { fs: 19, fill: BLUE, fw: '800' })
+  b += T(42, MC_Y + 86, 'Total earnings', { fs: 8.5, fill: GRAY })
+  ;[197, 397, 597].forEach(lx => b += L(lx, MC_Y + 18, lx, MC_Y + MC_H - 18, BORDER, 1))
+  b += metric(217, MC_Y + 45, subsAmt, 'Subscriptions', 'sub')
+  b += metric(217, MC_Y + 90, tipsAmt, 'Tips', 'tip')
+  b += metric(420, MC_Y + 45, postsAmt, 'Posts', 'post')
+  b += metric(420, MC_Y + 90, referralsAmt, 'Referrals', 'ref')
+  b += metric(623, MC_Y + 45, messagesAmt, 'Messages', 'msg')
+  b += metric(623, MC_Y + 90, streamsAmt, 'Streams', 'stream')
+
+  // lower area
+  const LY = MC_Y + MC_H + 12
+  b += R(0, 26, 26, H - 26, '#050505')
+  ;[60, 100, 140, 180, 220].forEach(iy => b += R(8, iy, 10, 10, 'none', 2, '#555', 1.2))
+
+  // My shifts panel
+  const SH_H = H - LY - 14
+  b += R(34, LY, 178, SH_H, PANEL, 10, BORDER, 1)
+  b += T(50, LY + 22, 'My shifts', { fs: 11.5, fw: '700' })
+  b += `<circle cx="106" cy="${LY+18}" r="6" fill="none" stroke="${GRAY}" stroke-width="1"/><text x="106" y="${LY+21}" font-size="7" fill="${GRAY}" text-anchor="middle">i</text>`
+  const myCx = 34 + 89, myCy = LY + SH_H / 2 + 10
+  b += R(myCx - 16, myCy - 16, 32, 28, 'none', 4, '#444', 1.3)
+  b += L(myCx - 9, myCy - 7, myCx + 9, myCy - 7, '#444', 1.2)
+  b += L(myCx - 9, myCy - 1, myCx + 9, myCy - 1, '#444', 1.2)
+  b += T(myCx, myCy + 34, 'No data', { fs: 9.5, fill: GRAY, anchor: 'middle' })
+
+  // right column: clocked-in employees + employee sales chart
+  const RX = 222
+  b += R(RX, LY, 636, 46, PANEL, 10, BORDER, 1)
+  b += T(RX + 16, LY + 22, 'Current clocked-in employees', { fs: 11.5, fw: '700' })
+  b += T(RX + 235, LY + 22, '👥 1', { fs: 9.5, fill: GRAY })
+  b += R(RX + 16, LY + 30, 46, 16, '#222226', 8)
+  b += T(RX + 39, LY + 41, 'Junior', { fs: 8, fill: '#ccc', anchor: 'middle' })
+
+  const y2 = LY + 46 + 10, h2 = SH_H - 46 - 10
+  b += R(RX, y2, 636, h2, PANEL, 10, BORDER, 1)
+  b += T(RX + 16, y2 + 20, 'Employee sales', { fs: 11.5, fw: '700' })
+  b += `<circle cx="${RX+108}" cy="${y2+16}" r="6" fill="none" stroke="${GRAY}" stroke-width="1"/><text x="${RX+108}" y="${y2+19}" font-size="7" fill="${GRAY}" text-anchor="middle">i</text>`
+
+  const chX = RX + 95, chY = y2 + 34, chW = 525, chH = h2 - 50
+  ;[0, 1, 2, 3, 4].forEach(i => {
+    const gy = chY + chH * i / 4
+    b += L(chX, gy, chX + chW, gy, '#262629', 1, '2,4')
+    b += T(chX - 10, gy + 3, String(2000 - i * 500), { fs: 8, fill: GRAY, anchor: 'end' })
+  })
+  const SHAPE = [0.75, 0.48, 0.57, 0.80, 0.74, 0.36, 0.50, 0.02, 0, 0, 0, 0, 0, 0, 0]
+  const resample = (arr, n) => Array.from({ length: n }, (_, i) => {
+    const t = n > 1 ? i / (n - 1) * (arr.length - 1) : 0
+    const i0 = Math.floor(t), i1 = Math.min(i0 + 1, arr.length - 1), f = t - i0
+    return arr[i0] * (1 - f) + arr[i1] * f
+  })
+  const chartVals = resample(SHAPE, bars)
+  const pts = chartVals.map((v, i) => ({ x: chX + (bars > 1 ? i / (bars - 1) : 0) * chW, y: chY + chH * (1 - v) }))
+  b += `<path d="${svgSmooth(pts)}" fill="none" stroke="${BLUE}" stroke-width="1.6"/>`
+  pts.forEach(p => b += Crc(p.x, p.y, 2.6, '#0a0a0a', BLUE, 1.6))
+  chartDates.forEach((lbl, i) => {
+    const lx = chX + (chartDates.length > 1 ? i / (chartDates.length - 1) : 0) * chW
+    b += T(lx, chY + chH + 16, lbl, { fs: 7.8, fill: GRAY, anchor: i === 0 ? 'start' : i === chartDates.length - 1 ? 'end' : 'middle' })
+  })
+
+  return `<svg width="${W * SCALE}" height="${H * SCALE}" viewBox="0 0 ${W} ${H}" xmlns="http://www.w3.org/2000/svg">${b}</svg>`
+}
+
+const DASH_TEMPLATES = new Set(['OF', 'Fanfix', 'Fanvue', 'Reveal'])
 
 app.post('/dashboard/generate', genericLimiter, async (req, res) => {
   try {
     const { amount, period, template, startDate, endDate } = req.body
-    const gross    = parseFloat(amount) || 0
-    const tpl      = (template || 'OF').trim()
-    const isInflow = tpl === 'Reveal'
+    const gross = parseFloat(amount) || 0
+    const tpl   = (template || 'OF').trim()
 
-    if (tpl !== 'OF' && !DASH_CFG[tpl]) return res.status(404).json({ error: `Template introuvable: ${tpl}` })
+    if (!DASH_TEMPLATES.has(tpl)) return res.status(404).json({ error: `Template introuvable: ${tpl}` })
 
     // Period
     let bars = 30, pStart, pEnd
@@ -2161,7 +2360,7 @@ app.post('/dashboard/generate', genericLimiter, async (req, res) => {
 
     // Shared financials (seeded)
     const rng0      = seededRng(gross)
-    const net       = isInflow ? gross : gross * 0.80
+    const net       = gross * 0.80
     const curBal    = gross * (0.06 + rng0() * 0.04)
     const pendBal   = gross * (0.22 + rng0() * 0.08)
     const growthPct = Math.floor(15 + rng0() * 30)
@@ -2212,48 +2411,65 @@ app.post('/dashboard/generate', genericLimiter, async (req, res) => {
         growthPct,
         cData, cData2, bars, dateLabels,
       })
-    } else {
-      // ── Fanfix / Fanvue / Reveal: generic SVG layout ──────────────────────
-      const accent   = DASH_ACCENT[tpl] || '#00aff0'
-      const fmtDate  = dt => dt.toLocaleDateString('fr-FR', { day: '2-digit', month: 'short', year: 'numeric' })
-      const fmtShort = v => '$' + (v >= 1000 ? (v / 1000).toFixed(1) + 'k' : v.toFixed(0))
-      let fmtXLabel
-      if (period === '24h')             fmtXLabel = dt => `${dt.getHours()}h`
-      else if (period==='7d'||period==='1w') fmtXLabel = dt => dt.toLocaleDateString('fr-FR', { weekday: 'short' }).replace('.', '')
-      else                              fmtXLabel = dt => dt.toLocaleDateString('fr-FR', { day: 'numeric', month: 'short' })
-
-      const statFans   = Math.floor(gross / (8 + rng0() * 12))
-      const statNew    = Math.floor(statFans * (0.08 + rng0() * 0.12))
-      const statRenew  = Math.floor(72 + rng0() * 22)
-      const statNewPct = Math.floor(8 + rng0() * 24)
-      const txnDates   = [1, 3, 5, 7].map(d => {
-        const dt = new Date(pEnd.getTime() - d * 86400000)
-        return dt.toLocaleDateString('fr-FR', { day: '2-digit', month: 'short', year: 'numeric' })
-      })
-      const txnAmts = [
-        fmtUSD(gross * (0.03 + rng0() * 0.04)),
-        fmtUSD(gross * (0.01 + rng0() * 0.02)),
-        fmtUSD(gross * (0.02 + rng0() * 0.03)),
-        `-${fmtUSD(gross * (0.55 + rng0() * 0.15))}`,
-      ]
-      const dateLabels = Array.from({ length: 5 }, (_, i) => {
-        const t  = i / 4
+    } else if (tpl === 'Fanfix') {
+      // ── Fanfix: Content Protection layout matching Fanfix.png ─────────────
+      const periodLabel =
+        period === '24h'                   ? 'Last 24 hours' :
+        period === '7d' || period === '1w' ? 'Last 7 days'   :
+        period === 'custom'                ? 'Custom period' : 'Last 30 days'
+      const dateLabels = Array.from({ length: 6 }, (_, i) => {
+        const t  = i / 5
         const dt = new Date(pStart.getTime() + t * (pEnd.getTime() - pStart.getTime()))
-        return fmtXLabel(dt)
+        return dt.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })
       })
-      const periodLabel = period==='24h'?'24 heures':period==='7d'?'7 jours':period==='1w'?'1 semaine':'30 jours'
-      const cData  = dashOrganic(gross, bars, gross)
-      const cData2 = dashOrganic(gross * 0.12, bars, gross + 1)
 
-      svgStr = buildDashSvg(tpl, {
-        accent, isInflow, gross, net,
-        curBal:  fmtUSD(curBal),
-        pendBal: fmtUSD(pendBal),
-        growthPct, statFans, statNew, statRenew, statNewPct,
-        statAvg: fmtShort(gross / Math.max(statFans, 1)),
-        txnDates, txnAmts, dateLabels, periodLabel,
-        dateRange: `${fmtDate(pStart)} – ${fmtDate(pEnd)}`,
-        cData, cData2, bars,
+      svgStr = buildFanfixSvg({
+        revenueAmt: fmtUSD(gross),
+        periodLabel,
+        dateLabels,
+      })
+    } else if (tpl === 'Fanvue') {
+      // ── Fanvue: dark mobile Insights layout matching Fanvue.png ───────────
+      const fmtEN = dt => dt.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })
+      const periodLabel =
+        period === '24h'                   ? 'Last 24 Hours' :
+        period === '7d' || period === '1w' ? 'Last 7 Days'   :
+        period === 'custom'                ? 'Custom Period' : 'Last 30 Days'
+
+      svgStr = buildFanvueSvg({
+        earningsAmt: fmtUSD(net),
+        monthAmt:    fmtUSD(net * 0.128),
+        monthLabel:  pEnd.toLocaleDateString('en-US', { month: 'long', year: 'numeric' }),
+        periodLabel,
+        dateRange:   `${fmtEN(pStart)} - ${fmtEN(pEnd)}`,
+        totalAmt:    fmtUSD(net * 0.192),
+        totalDelta:  '+3.74%',
+        subsAmt:     fmtUSD(net * 0.10),
+        subsDelta:   '+19.76%',
+        chartStart:  pStart.toLocaleDateString('en-US', { month: 'short', day: 'numeric' }),
+        chartEnd:    pEnd.toLocaleDateString('en-US', { month: 'short', day: 'numeric' }),
+      })
+    } else {
+      // ── Reveal: dark "Creator earnings overview" layout matching Reveal.png ─
+      const activeTab =
+        period === '24h'                   ? 'Today'     :
+        period === '7d' || period === '1w' ? 'This week' : 'This month'
+      const labelCount = Math.min(bars, 8)
+      const chartDates = Array.from({ length: labelCount }, (_, i) => {
+        const t  = labelCount > 1 ? i / (labelCount - 1) : 0
+        const dt = new Date(pStart.getTime() + t * (pEnd.getTime() - pStart.getTime()))
+        return dt.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })
+      })
+
+      svgStr = buildRevealSvg({
+        totalAmt:     fmtUSD(gross),
+        subsAmt:      fmtUSD(gross * 0.1127),
+        tipsAmt:      fmtUSD(gross * 0.0790),
+        postsAmt:     fmtUSD(0),
+        referralsAmt: fmtUSD(0),
+        messagesAmt:  fmtUSD(gross * 0.8083),
+        streamsAmt:   fmtUSD(0),
+        activeTab, chartDates, bars,
       })
     }
 
