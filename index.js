@@ -2284,7 +2284,15 @@ function buildRevealSvg(d) {
   // lower area
   const LY = MC_Y + MC_H + 12
   b += R(0, 26, 26, H - 26, '#050505')
-  ;[60, 100, 140, 180, 220].forEach(iy => b += R(8, iy, 10, 10, 'none', 2, '#555', 1.2))
+  // sidebar nav icons
+  const sideIcons = [
+    iy => [0,3,6].map(dy => `<line x1="8" y1="${iy+1+dy}" x2="18" y2="${iy+1+dy}" stroke="#555" stroke-width="1.2" stroke-linecap="round"/>`).join(''),
+    iy => [0,1].flatMap(r=>[0,1].map(c=>`<rect x="${8+c*5}" y="${iy+r*5}" width="4" height="4" rx="0.5" fill="#444"/>`)).join(''),
+    iy => `<rect x="8" y="${iy+5}" width="2.5" height="5" fill="#555" rx="0.5"/><rect x="11.5" y="${iy+2}" width="2.5" height="8" fill="#555" rx="0.5"/><rect x="15" y="${iy}" width="2.5" height="10" fill="#555" rx="0.5"/>`,
+    iy => `<circle cx="13" cy="${iy+3}" r="2.5" fill="none" stroke="#555" stroke-width="1.2"/><path d="M8,${iy+10} C8,${iy+5} 18,${iy+5} 18,${iy+10}" fill="none" stroke="#555" stroke-width="1.2"/>`,
+    iy => `<circle cx="13" cy="${iy+5}" r="2" fill="none" stroke="#555" stroke-width="1.2"/><circle cx="13" cy="${iy+5}" r="4.5" fill="none" stroke="#555" stroke-width="1.2" stroke-dasharray="2 1.5"/>`,
+  ]
+  ;[60, 100, 140, 180, 220].forEach((iy, i) => b += sideIcons[i](iy))
 
   // My shifts panel
   const SH_H = H - LY - 14
@@ -2360,7 +2368,7 @@ app.post('/dashboard/generate', genericLimiter, async (req, res) => {
 
     // Shared financials (seeded)
     const rng0      = seededRng(gross)
-    const net       = gross * 0.80
+    const net       = tpl === 'Reveal' ? gross : gross * 0.80
     const curBal    = gross * (0.06 + rng0() * 0.04)
     const pendBal   = gross * (0.22 + rng0() * 0.08)
     const growthPct = Math.floor(15 + rng0() * 30)
@@ -2424,7 +2432,7 @@ app.post('/dashboard/generate', genericLimiter, async (req, res) => {
       })
 
       svgStr = buildFanfixSvg({
-        revenueAmt: fmtUSD(gross),
+        revenueAmt: fmtUSD(net),
         periodLabel,
         dateLabels,
       })
