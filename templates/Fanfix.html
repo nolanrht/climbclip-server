@@ -1,131 +1,121 @@
 <!DOCTYPE html>
-<html lang="fr">
-<head>
-<meta charset="UTF-8">
+<html lang="en"><head><meta charset="UTF-8">
 <style>
-*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
-body{font-family:-apple-system,BlinkMacSystemFont,'Helvetica Neue',Arial,sans-serif;background:#fafafa;width:768px;color:#111;-webkit-font-smoothing:antialiased}
-
-.nav{height:54px;background:#1a0535;display:flex;align-items:center;padding:0 22px;gap:28px}
-.nav-brand{font-size:18px;font-weight:800;color:#a855f7;letter-spacing:-.02em}
-.nav-item{font-size:12px;color:rgba(255,255,255,.4)}
-.nav-item.active{color:#c084fc}
-
-.wrap{padding:30px 24px 0}
-.pg-title{font-size:22px;font-weight:700;color:#1a0535;margin-bottom:30px}
-
-.balance-row{display:flex;padding-bottom:28px;border-bottom:1.5px solid #ede0ff;margin-bottom:26px;background:#fff;border-radius:14px;padding:20px 20px 20px;margin-bottom:22px;box-shadow:0 1px 3px rgba(168,85,247,.08)}
-.bal{flex:1}
-.bal+.bal{padding-left:24px;border-left:1.5px solid #f0e8ff}
-.bal-label{font-size:11px;font-weight:600;letter-spacing:.07em;text-transform:uppercase;color:#c084fc;margin-bottom:8px}
-.bal-amount{font-size:36px;font-weight:700;letter-spacing:-.025em;color:#1a0535;line-height:1;margin-bottom:4px}
-.bal-amount.muted{color:#c084fc;font-size:28px}
-.bal-sub{font-size:11px;color:#ccc}
-
-.period-head{font-size:15px;font-weight:700;color:#1a0535;margin-bottom:3px}
-.period-dates{font-size:12px;color:#999;margin-bottom:20px}
-.divider{height:1.5px;background:#f0e8ff;margin:0 0 20px}
-
-.earn-row{display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:18px}
-.earn-net{font-size:28px;font-weight:700;letter-spacing:-.02em;color:#1a0535;line-height:1;margin-bottom:5px}
-.earn-sub{font-size:12px;color:#999}
-.badge{background:rgba(168,85,247,.12);color:#a855f7;font-size:13px;font-weight:600;padding:6px 15px;border-radius:99px;white-space:nowrap}
-
-.chart-main{display:block;margin:0 -24px}
-.chart-sec{display:block;margin:0 -24px}
-.date-axis{display:flex;justify-content:space-between;padding:6px 34px;border-bottom:1.5px solid #f0e8ff}
-.date-axis span{font-size:10.5px;color:#bbb}
-
-.stats-section{padding:26px 24px}
-.stats-title{font-size:13px;font-weight:700;color:#1a0535;margin-bottom:16px;text-transform:uppercase;letter-spacing:.06em}
-.stats-grid{display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-bottom:28px}
-.stat-card{background:#fff;border:1px solid #f0e8ff;border-radius:10px;padding:16px;box-shadow:0 1px 2px rgba(168,85,247,.06)}
-.stat-label{font-size:11px;color:#999;margin-bottom:6px}
-.stat-val{font-size:22px;font-weight:700;color:#1a0535}
-.stat-delta{font-size:11px;color:#a855f7;margin-top:2px}
-
-.txn-title{font-size:13px;font-weight:700;color:#1a0535;margin-bottom:14px;text-transform:uppercase;letter-spacing:.06em}
-.txn-row{display:flex;justify-content:space-between;align-items:center;padding:12px 0;border-bottom:1px solid #f5f0ff}
-.txn-type{font-size:13px;color:#444}
-.txn-date{font-size:11px;color:#bbb;margin-top:2px}
-.txn-amt{font-size:14px;font-weight:600;color:#1a0535}
-.txn-amt.neg{color:#f43f5e}
-</style>
-</head>
+*{box-sizing:border-box;margin:0;padding:0}
+html,body{width:1000px;height:611px;overflow:hidden}
+body{background:linear-gradient(135deg,#dce9fb 0%,#ece3f6 50%,#fbe1ee 100%);font-family:-apple-system,BlinkMacSystemFont,"Helvetica Neue",Arial,sans-serif;-webkit-font-smoothing:antialiased;color:#0a0a0a;display:flex}
+.sb{width:108px;flex-shrink:0;height:611px;background:#fff;display:flex;flex-direction:column;border-right:1px solid rgba(0,0,0,0.06)}
+.sb-logo{display:flex;align-items:center;gap:8px;padding:14px 14px 8px}
+.sb-av{width:20px;height:20px;border-radius:50%;background:radial-gradient(circle at 35% 35%,#f9a8d4,#a78bfa,#7c3aed);flex-shrink:0}
+.sb-lbl{font-size:12.5px;font-weight:800;letter-spacing:.3px}
+.sb-user{padding:8px 12px;display:flex;align-items:center;gap:6px}
+.sb-uav{width:26px;height:26px;border-radius:50%;background:radial-gradient(circle at 35% 35%,#f9a8d4,#a78bfa,#7c3aed);flex-shrink:0}
+.sb-un{font-size:11.5px;font-weight:700;line-height:1.2}
+.sb-share{font-size:9.5px;color:#9b8afb;text-decoration:underline}
+.sb-create{background:#0a0a0a;color:#fff;font-size:11px;font-weight:600;border-radius:13px;height:26px;display:flex;align-items:center;justify-content:center;margin:6px 12px 10px}
+.sb-menu{flex:1}
+.sb-mi{display:flex;align-items:center;gap:8px;padding:6px 12px;font-size:10.8px;color:#333;position:relative}
+.sb-ch{position:absolute;right:10px;font-size:11px;color:#bbb}
+.sb-badge{position:absolute;right:8px;top:4px;border-radius:50%;width:14px;height:14px;display:flex;align-items:center;justify-content:center;font-size:8px;color:#fff;font-weight:700}
+.sb-dot{width:12px;height:12px;border-radius:50%;border:1.3px solid #999;flex-shrink:0}
+.sb-foot{padding:8px 12px 6px;border-top:1px solid #eee;font-size:10.5px;color:#666;line-height:2}
+.sb-foot span{display:block;color:#888}
+.sb-hide{font-size:10px;color:#999;padding:6px 12px 8px}
+.main{flex:1;padding:0 0 0 24px;display:flex;flex-direction:column;min-width:0}
+.mh{padding:18px 24px 0 0}
+.mh-t{font-size:23px;font-weight:800}
+.mh-s{font-size:11.5px;color:#8a8a8a;margin-top:3px}
+.tabs{display:flex;align-items:flex-end;margin:12px 24px 0 0;border-bottom:1px solid rgba(0,0,0,0.08);padding-bottom:0}
+.tab{font-size:11.5px;color:#999;padding:0 0 8px;margin-right:24px;position:relative;white-space:nowrap;flex-shrink:0}
+.tab.a{color:#0a0a0a;font-weight:700}
+.tab.a::after{content:'';position:absolute;bottom:-1px;left:0;right:0;height:1.6px;background:#0a0a0a}
+.rpt-btn{margin-left:auto;background:#6d4aff;color:#fff;font-size:10.8px;font-weight:600;border-radius:14px;padding:5px 14px 8px;white-space:nowrap}
+.row1{display:flex;gap:14px;margin-top:12px;margin-right:24px;flex-shrink:0}
+.scan-card{background:#fdfbff;border-radius:12px;border:1px solid #f0e8fc;flex:0 0 478px;padding:14px 16px 10px}
+.sc-head{display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:4px}
+.sc-t{font-size:13.5px;font-weight:700}
+.sc-s{font-size:10.5px;color:#8a8a8a;margin-top:2px}
+.sc-period{background:#fff;border:1px solid #e8dffb;border-radius:10px;font-size:9.5px;color:#666;padding:3px 10px;white-space:nowrap}
+.stat-col{display:flex;flex-direction:column;gap:10px}
+.stat-card{border-radius:10px;padding:8px 14px;width:140px;color:#fff;flex-shrink:0}
+.stat-n{font-size:18px;font-weight:800;line-height:1.5}
+.stat-l{font-size:10px;opacity:.92}
+.row2{display:flex;gap:14px;margin-top:12px;margin-right:24px;flex:1;min-height:0}
+.r2-card{background:#fff;border-radius:12px;border:1px solid #f0eaf9;flex:1;padding:12px 14px;overflow:hidden;min-width:0}
+.r2-t{font-size:12px;font-weight:700;margin-bottom:2px}
+.r2-rt{float:right;font-size:8.5px;color:#aaa}
+.url-item{font-size:9.5px;color:#7c3aed;margin-top:8px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.donut-legend{display:flex;gap:10px;margin-top:6px;flex-wrap:wrap}
+.leg{font-size:8.3px;color:#777;display:flex;align-items:center;gap:3px}
+.dot{width:6px;height:6px;border-radius:50%;display:inline-block}
+.footer{font-size:9px;color:#999;text-align:right;padding:4px 24px 6px 0}
+</style></head>
 <body>
-
-<nav class="nav">
-  <div class="nav-brand">Fanfix</div>
-  <div class="nav-item">Home</div>
-  <div class="nav-item">Messages</div>
-  <div class="nav-item active">Earnings</div>
-  <div class="nav-item">Profile</div>
-</nav>
-
-<div class="wrap">
-  <div class="pg-title">Earnings Overview</div>
-
-  <div class="balance-row">
-    <div class="bal">
-      <div class="bal-label">Current balance</div>
-      <div class="bal-amount">{{CURRENT_BAL}}</div>
-      <div class="bal-sub">Ready for withdrawal</div>
-    </div>
-    <div class="bal">
-      <div class="bal-label">Pending balance</div>
-      <div class="bal-amount muted">{{PENDING_BAL}}</div>
-      <div class="bal-sub">In review</div>
-    </div>
+<div class="sb">
+  <div class="sb-logo"><div class="sb-av"></div><span class="sb-lbl">FANFIX</span></div>
+  <div class="sb-user"><div class="sb-uav"></div><div><div class="sb-un">Hi, john</div><span class="sb-share">Share profile ↗</span></div></div>
+  <div class="sb-create">+ Create</div>
+  <div class="sb-menu">
+    <div class="sb-mi"><div class="sb-dot"></div>Insights</div>
+    <div class="sb-mi"><div class="sb-dot"></div>Analytics<span class="sb-ch">›</span></div>
+    <div class="sb-mi"><div class="sb-dot"></div>Messages<span class="sb-badge" style="background:#3b82f6">3</span></div>
+    <div class="sb-mi"><div class="sb-dot"></div>Memberships<span class="sb-ch">›</span></div>
+    <div class="sb-mi"><div class="sb-dot"></div>Notifications<span class="sb-badge" style="background:#7c3aed">7</span></div>
+    <div class="sb-mi"><div class="sb-dot"></div>Vault</div>
+    <div class="sb-mi"><div class="sb-dot"></div>Scheduler</div>
+    <div class="sb-mi"><div class="sb-dot"></div>Community<span class="sb-ch">›</span></div>
   </div>
-
-  <div class="period-head">{{PERIODE}}</div>
-  <div class="period-dates">{{DATE_RANGE}}</div>
-  <div class="divider"></div>
-
-  <div class="earn-row">
-    <div>
-      <div class="earn-net">{{MONTANT_NET}}</div>
-      <div class="earn-sub">Net earnings &nbsp;·&nbsp; gross: {{MONTANT_BRUT}}</div>
-    </div>
-    <div class="badge">+{{GROWTH_PCT}}%</div>
-  </div>
+  <div class="sb-foot">Settings <span>Contact Us</span><span>Sign Out</span></div>
+  <div class="sb-hide">Hide menu</div>
 </div>
-
-<div class="chart-main">{{CHART_SVG}}</div>
-<div class="chart-sec">{{CHART_SVG2}}</div>
-<div class="date-axis">{{DATE_LABELS_HTML}}</div>
-
-<div class="stats-section">
-  <div class="stats-title">Analytics</div>
-  <div class="stats-grid">
-    <div class="stat-card">
-      <div class="stat-label">Supporters actifs</div>
-      <div class="stat-val">{{STAT_FANS}}</div>
-      <div class="stat-delta">↑ {{GROWTH_PCT}}% ce mois</div>
+<div class="main">
+  <div class="mh"><div class="mh-t">Content Protection</div><div class="mh-s">World's most powerful AI powered detection and removal!</div></div>
+  <div class="tabs">
+    <span class="tab a">Dashboard</span>
+    <span class="tab">Reported Links</span>
+    <span class="tab">Whitelist</span>
+    <span class="tab">AI Scan Detection</span>
+    <span class="tab">Reddit Scan</span>
+    <span class="tab">Settings</span>
+    <div class="rpt-btn">Report Links</div>
+  </div>
+  <div class="row1">
+    <div class="scan-card">
+      <div class="sc-head">
+        <div><div class="sc-t">Scan Detections</div><div class="sc-s">Results Detected Over Time</div></div>
+        <div class="sc-period">{{PERIOD_LABEL}}</div>
+      </div>
+      {{CHART_WAVE}}
     </div>
-    <div class="stat-card">
-      <div class="stat-label">Nouveaux supporters</div>
-      <div class="stat-val">{{STAT_NEW}}</div>
-      <div class="stat-delta">↑ {{STAT_NEW_PCT}}% vs précédent</div>
-    </div>
-    <div class="stat-card">
-      <div class="stat-label">Taux de rétention</div>
-      <div class="stat-val">{{STAT_RENEW}}%</div>
-      <div class="stat-delta">Période en cours</div>
-    </div>
-    <div class="stat-card">
-      <div class="stat-label">Revenu moyen</div>
-      <div class="stat-val">{{STAT_AVG}}</div>
-      <div class="stat-delta">Par supporter</div>
+    <div class="stat-col">
+      <div class="stat-card" style="background:#ec4899"><div class="stat-n">9</div><div class="stat-l">Google Results</div></div>
+      <div class="stat-card" style="background:#a78bfa"><div class="stat-n">7</div><div class="stat-l">Reddit Detection</div></div>
+      <div class="stat-card" style="background:#7c3aed"><div class="stat-n">6</div><div class="stat-l">Google Images</div></div>
     </div>
   </div>
-
-  <div class="txn-title">Transactions récentes</div>
-  <div class="txn-row"><div><div class="txn-type">Abonnement mensuel</div><div class="txn-date">{{TXN_DATE1}}</div></div><div class="txn-amt">{{TXN_AMT1}}</div></div>
-  <div class="txn-row"><div><div class="txn-type">Pourboire</div><div class="txn-date">{{TXN_DATE2}}</div></div><div class="txn-amt">{{TXN_AMT2}}</div></div>
-  <div class="txn-row"><div><div class="txn-type">Contenu exclusif</div><div class="txn-date">{{TXN_DATE3}}</div></div><div class="txn-amt">{{TXN_AMT3}}</div></div>
-  <div class="txn-row"><div><div class="txn-type">Payout</div><div class="txn-date">{{TXN_DATE4}}</div></div><div class="txn-amt neg">{{TXN_AMT4}}</div></div>
+  <div class="row2">
+    <div class="r2-card">
+      <div><span class="r2-rt">Last 30 days</span><div class="r2-t">Top 3 Infringers</div></div>
+      {{CHART_DONUT}}
+      <div class="donut-legend">
+        <div class="leg"><div class="dot" style="background:#ec4899"></div>reddit.com</div>
+        <div class="leg"><div class="dot" style="background:#a78bfa"></div>instagram.com</div>
+        <div class="leg"><div class="dot" style="background:#7c3aed"></div>tiktok.com</div>
+      </div>
+    </div>
+    <div class="r2-card">
+      <div><span class="r2-rt">Total: {{REVENUE_AMT}}</span><div class="r2-t">Potential Revenue</div><div class="r2-t">Saved</div></div>
+      {{CHART_BARS}}
+    </div>
+    <div class="r2-card">
+      <div class="r2-t">Recently Detected URLs</div>
+      <div class="url-item">https://www.twitter.com/ac…</div>
+      <div class="url-item">https://images.google.com/…</div>
+      <div class="url-item">https://www.tiktok.com/@ac…</div>
+      <div class="url-item">https://images.google.com/…</div>
+      <div class="url-item">https://images.google.com/…</div>
+    </div>
+  </div>
+  <div class="footer">© Powered by Takedowns AI</div>
 </div>
-
-</body>
-</html>
+</body></html>

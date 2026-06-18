@@ -15,6 +15,7 @@ const ws = require("ws")
 const { exec } = require("child_process")
 const { promisify } = require("util")
 const execAsync = promisify(exec)
+const puppeteer = require("puppeteer-core")
 
 ffmpeg.setFfmpegPath(ffmpegPath)
 
@@ -2342,6 +2343,313 @@ function buildRevealSvg(d) {
   return `<svg width="${W * SCALE}" height="${H * SCALE}" viewBox="0 0 ${W} ${H}" xmlns="http://www.w3.org/2000/svg">${b}</svg>`
 }
 
+// ─── PUPPETEER BROWSER ───────────────────────────────────────────────────────
+let _browser = null
+async function getBrowser() {
+  if (_browser && _browser.connected) return _browser
+  let executablePath
+  if (process.platform !== 'darwin') {
+    // Linux/Railway: use @sparticuz/chromium
+    try {
+      const chromiumPkg = require('@sparticuz/chromium')
+      const chromium = chromiumPkg.default || chromiumPkg
+      if (typeof chromium.executablePath === 'function') {
+        executablePath = await chromium.executablePath()
+      }
+    } catch (_) {}
+    // Also check system chromium on Linux
+    if (!executablePath) {
+      for (const p of ['/usr/bin/chromium-browser', '/usr/bin/chromium']) {
+        try { fs.accessSync(p); executablePath = p; break } catch (_2) {}
+      }
+    }
+  } else {
+    // macOS dev: use system Chrome/Chromium
+    for (const p of [
+      '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
+      '/Applications/Chromium.app/Contents/MacOS/Chromium',
+    ]) { try { fs.accessSync(p); executablePath = p; break } catch (_2) {} }
+  }
+  _browser = await puppeteer.launch({
+    executablePath,
+    headless: true,
+    args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage',
+           '--disable-gpu', '--no-first-run', '--disable-extensions',
+           '--disable-background-networking', '--disable-sync'],
+  })
+  return _browser
+}
+
+async function renderHtml(html, vpWidth, vpHeight) {
+  const browser = await getBrowser()
+  const page = await browser.newPage()
+  try {
+    await page.setViewport({ width: vpWidth, height: vpHeight, deviceScaleFactor: 2 })
+    const dataUrl = 'data:text/html;charset=utf-8,' + encodeURIComponent(html)
+    await page.goto(dataUrl, { waitUntil: 'domcontentloaded', timeout: 30000 })
+    const buf = await page.screenshot({ type: 'png', clip: { x: 0, y: 0, width: vpWidth, height: vpHeight } })
+    return buf
+  } finally {
+    await page.close()
+  }
+}
+
+// ─── CHART SVG HELPERS (shared for HTML injection) ──────────────────────────
+function makeOFMainChart(cData, bars) {
+  const W = 768, CH = 280, CPL = 8, CPR = 68, CPT = 16
+  const CPW = W - CPL - CPR, CPH = CH - CPT
+  const BLUE = '#00aff0', BDR = '#e5e5e5', LGR = '#9e9e9e'
+  const maxD = Math.max(...cData, 1)
+  const yTop = roundToNice(maxD * 1.05)
+  const yLvls = [
+    { v: yTop,            gy: CPT },
+    { v: Math.round(yTop * 2 / 3), gy: CPT + CPH * (1 / 3) },
+    { v: Math.round(yTop * 1 / 3), gy: CPT + CPH * (2 / 3) },
+  ]
+  const cPts = cData.map((v, i) => ({
+    x: CPL + (bars > 1 ? i / (bars - 1) : 0) * CPW,
+    y: CPT + (1 - v / yTop) * CPH,
+  }))
+  const cLine = svgSmooth(cPts)
+  const cFill = cLine + ` L ${cPts[cPts.length - 1].x.toFixed(1)} ${(CPT + CPH).toFixed(1)} L ${CPL} ${(CPT + CPH).toFixed(1)} Z`
+  let s = `<svg width="${W}" height="${CH}" viewBox="0 0 ${W} ${CH}" xmlns="http://www.w3.org/2000/svg" style="display:block;flex-shrink:0">`
+  s += `<rect width="${W}" height="${CH}" fill="#f0faff"/>`
+  s += `<defs><linearGradient id="ofG" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stop-color="${BLUE}" stop-opacity="0.28"/><stop offset="100%" stop-color="${BLUE}" stop-opacity="0.04"/></linearGradient></defs>`
+  for (let i = 1; i <= 4; i++) { const gx = CPL + CPW * i / 5; s += `<line x1="${gx.toFixed(1)}" y1="${CPT}" x2="${gx.toFixed(1)}" y2="${(CPT + CPH).toFixed(1)}" stroke="${BDR}" stroke-width="0.8"/>` }
+  yLvls.forEach(lv => { s += `<line x1="${CPL}" y1="${lv.gy.toFixed(1)}" x2="${(W - CPR).toFixed(1)}" y2="${lv.gy.toFixed(1)}" stroke="${BDR}" stroke-width="0.8"/>` })
+  s += `<path d="${cFill}" fill="url(#ofG)"/>`
+  s += `<path d="${cLine}" fill="none" stroke="${BLUE}" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>`
+  yLvls.forEach(lv => { s += `<text x="${W - CPR + 10}" y="${(lv.gy + 4).toFixed(1)}" font-family="Arial,sans-serif" font-size="13" fill="${LGR}">$${Math.round(lv.v).toLocaleString('en-US')}</text>` })
+  s += '</svg>'
+  return s
+}
+
+function makeOFSecChart(cData2, bars) {
+  const W = 768, C2H = 98, C2PL = 8, C2PR = 68, C2PT = 10, C2PB = 8
+  const C2PW = W - C2PL - C2PR, C2PH = C2H - C2PT - C2PB
+  const LGR = '#9e9e9e', BDR = '#e5e5e5'
+  const maxV2 = Math.max(...cData2, 1)
+  const y2Top = roundToNice(maxV2 * 1.15)
+  const c2Pts = cData2.map((v, i) => ({
+    x: C2PL + (bars > 1 ? i / (bars - 1) : 0) * C2PW,
+    y: C2PT + (1 - v / y2Top) * C2PH,
+  }))
+  const c2Line = svgSmooth(c2Pts)
+  const c2Fill = c2Line + ` L ${c2Pts[c2Pts.length - 1].x.toFixed(1)} ${(C2PT + C2PH).toFixed(1)} L ${C2PL} ${(C2PT + C2PH).toFixed(1)} Z`
+  let s = `<svg width="${W}" height="${C2H}" viewBox="0 0 ${W} ${C2H}" xmlns="http://www.w3.org/2000/svg" style="display:block;flex-shrink:0">`
+  s += `<rect width="${W}" height="${C2H}" fill="#ffffff"/>`
+  s += `<line x1="0" y1="0" x2="${W}" y2="0" stroke="${BDR}" stroke-width="0.8"/>`
+  s += `<path d="${c2Fill}" fill="rgba(0,0,0,0.05)"/>`
+  s += `<path d="${c2Line}" fill="none" stroke="#aaaaaa" stroke-width="2" stroke-linecap="round"/>`
+  s += `<text x="${W - C2PR + 10}" y="${C2PT + 4}" font-family="Arial,sans-serif" font-size="13" fill="${LGR}">${Math.round(y2Top)}</text>`
+  s += `<text x="${W - C2PR + 10}" y="${(C2PT + C2PH * 0.5 + 4).toFixed(1)}" font-family="Arial,sans-serif" font-size="13" fill="${LGR}">${Math.round(y2Top / 2)}</text>`
+  s += '</svg>'
+  return s
+}
+
+function makeFanfixWaveChart(dateLabels) {
+  const CW = 444, CH = 148
+  const svgSmooth2 = svgSmooth
+  const wave = (baseFrac, ampFrac, phase) => {
+    const pts = []
+    for (let i = 0; i <= 5; i++) {
+      const t = i / 5
+      const v = baseFrac + ampFrac * Math.sin(t * Math.PI * 1.6 + phase)
+      pts.push({ x: t * CW, y: CH * (1 - v) })
+    }
+    return pts
+  }
+  const layer = (pts, fill) => {
+    const dd = svgSmooth2(pts) + ` L ${pts[pts.length - 1].x.toFixed(1)} ${CH} L 0 ${CH} Z`
+    return `<path d="${dd}" fill="${fill}" opacity="0.85"/>`
+  }
+  let s = `<svg width="${CW}" height="${CH + 20}" viewBox="0 0 ${CW} ${CH + 20}" xmlns="http://www.w3.org/2000/svg" style="display:block">`
+  s += layer(wave(0.62, 0.14, 0.6), '#f9a8d4')
+  s += layer(wave(0.44, 0.16, 2.4), '#a78bfa')
+  s += layer(wave(0.26, 0.13, 4.1), '#7c3aed')
+  const dlLen = dateLabels.length
+  dateLabels.forEach((lbl, i) => {
+    const lx = dlLen > 1 ? i / (dlLen - 1) * CW : 0
+    const anchor = i === 0 ? 'start' : i === dlLen - 1 ? 'end' : 'middle'
+    s += `<text x="${lx.toFixed(1)}" y="${CH + 14}" font-family="Arial,sans-serif" font-size="9.5" fill="#aaa" text-anchor="${anchor}">${escXml(lbl)}</text>`
+  })
+  s += '</svg>'
+  return s
+}
+
+function makeFanfixDonut() {
+  const CX = 70, CY = 60, RO = 42, RI = 26
+  const segs = [{ frac: 0.5, c: '#ec4899' }, { frac: 0.15, c: '#a78bfa' }, { frac: 0.35, c: '#7c3aed' }]
+  let ang = -Math.PI / 2
+  let s = `<svg width="140" height="130" viewBox="0 0 140 130" xmlns="http://www.w3.org/2000/svg" style="display:block">`
+  segs.forEach(a => {
+    const a0 = ang, a1 = ang + a.frac * 2 * Math.PI
+    const x0o = CX + RO * Math.cos(a0), y0o = CY + RO * Math.sin(a0)
+    const x1o = CX + RO * Math.cos(a1), y1o = CY + RO * Math.sin(a1)
+    const x1i = CX + RI * Math.cos(a1), y1i = CY + RI * Math.sin(a1)
+    const x0i = CX + RI * Math.cos(a0), y0i = CY + RI * Math.sin(a0)
+    const large = a.frac > 0.5 ? 1 : 0
+    s += `<path d="M${x0o.toFixed(1)},${y0o.toFixed(1)} A${RO},${RO} 0 ${large} 1 ${x1o.toFixed(1)},${y1o.toFixed(1)} L${x1i.toFixed(1)},${y1i.toFixed(1)} A${RI},${RI} 0 ${large} 0 ${x0i.toFixed(1)},${y0i.toFixed(1)} Z" fill="${a.c}"/>`
+    ang = a1
+  })
+  s += `<text x="${CX}" y="${CY + 7}" font-family="Arial,sans-serif" font-size="20" font-weight="800" text-anchor="middle" fill="#0a0a0a">17</text>`
+  s += '</svg>'
+  return s
+}
+
+function makeFanfixBars(revenueAmt) {
+  const W = 175, H = 120
+  const days = ['Thu', 'Fri', 'Sat', 'Sun', 'Mon', 'Tue', 'Wed']
+  const barBaseY = H - 22, barMaxH = 80, bw = 14, gap = 10
+  let s = `<svg width="${W}" height="${H}" viewBox="0 0 ${W} ${H}" xmlns="http://www.w3.org/2000/svg" style="display:block;margin-top:6px">`
+  let bx = 4
+  days.forEach((day, i) => {
+    const isPeak = i === 2
+    const h2 = isPeak ? barMaxH : 2
+    const fill = isPeak ? '#7c3aed' : '#eee'
+    s += `<rect x="${bx}" y="${barBaseY - h2}" width="${bw}" height="${h2}" rx="2" fill="${fill}"/>`
+    if (isPeak) s += `<text x="${bx + bw / 2}" y="${barBaseY - h2 - 5}" font-family="Arial,sans-serif" font-size="7.6" fill="#333" text-anchor="middle">${escXml(revenueAmt)}</text>`
+    s += `<text x="${bx + bw / 2}" y="${barBaseY + 12}" font-family="Arial,sans-serif" font-size="8" fill="#999" text-anchor="middle">${day}</text>`
+    bx += bw + gap
+  })
+  s += '</svg>'
+  return s
+}
+
+function makeFanvueSpark(phase) {
+  const W = 178, H = 30
+  const pts = []
+  for (let i = 0; i <= 12; i++) {
+    const t = i / 12
+    const v = 0.5 + 0.28 * Math.sin(t * 7 + phase) + 0.12 * Math.sin(t * 13 + phase * 2)
+    pts.push({ x: t * W, y: H * (1 - Math.max(0.05, Math.min(0.95, v))) })
+  }
+  const line = svgSmooth(pts)
+  return `<svg width="${W}" height="${H}" viewBox="0 0 ${W} ${H}" xmlns="http://www.w3.org/2000/svg" style="display:block;margin-top:6px"><path d="${line}" fill="none" stroke="#22e584" stroke-width="1.6"/></svg>`
+}
+
+function makeFanvueChart(bars) {
+  const CW = 327, CH = 130
+  const linesSpec = [
+    { c: '#ffffff', base: 0.18, amp: 0.10, ph: 0.2, freq: 6 },
+    { c: '#7a2b2b', base: 0.46, amp: 0.08, ph: 1.1, freq: 7 },
+    { c: '#34d6c4', base: 0.52, amp: 0.09, ph: 2.0, freq: 5.5 },
+    { c: '#f5a623', base: 0.58, amp: 0.07, ph: 3.0, freq: 6.5 },
+    { c: '#4a7dff', base: 0.64, amp: 0.08, ph: 4.0, freq: 6 },
+    { c: '#c34ae0', base: 0.66, amp: 0.07, ph: 5.0, freq: 7.5 },
+  ]
+  let s = `<svg width="${CW}" height="${CH + 20}" viewBox="0 0 ${CW} ${CH + 20}" xmlns="http://www.w3.org/2000/svg" style="display:block">`
+  ;[0.25, 0.5, 0.75].forEach(f => { s += `<line x1="0" y1="${(CH * f).toFixed(1)}" x2="${CW}" y2="${(CH * f).toFixed(1)}" stroke="#2a2a2a" stroke-width="1" stroke-dasharray="3,4"/>` })
+  linesSpec.forEach(ln => {
+    const pts = []
+    for (let i = 0; i <= 40; i++) {
+      const t = i / 40
+      const v = ln.base - ln.amp * 0.5 + ln.amp * Math.sin(t * ln.freq + ln.ph) * 0.6 + ln.amp * 0.4 * Math.sin(t * ln.freq * 2.3 + ln.ph * 1.7)
+      pts.push({ x: t * CW, y: CH * Math.max(0.02, Math.min(0.98, v)) })
+    }
+    s += `<path d="${svgSmooth(pts)}" fill="none" stroke="${ln.c}" stroke-width="1.4" opacity="0.95"/>`
+  })
+  s += '</svg>'
+  return s
+}
+
+function makeRevealChart(bars, chartDates) {
+  const CW = 500, CH = 90
+  const BLUE = '#3b82f6', GRAY = '#8a8a8e'
+  const SHAPE = [0.75, 0.48, 0.57, 0.80, 0.74, 0.36, 0.50, 0.02, 0, 0, 0, 0, 0, 0, 0]
+  const resample = (arr, n) => Array.from({ length: n }, (_, i) => {
+    const t = n > 1 ? i / (n - 1) * (arr.length - 1) : 0
+    const i0 = Math.floor(t), i1 = Math.min(i0 + 1, arr.length - 1), f = t - i0
+    return arr[i0] * (1 - f) + arr[i1] * f
+  })
+  const vals = resample(SHAPE, bars)
+  const pts = vals.map((v, i) => ({ x: i / (bars > 1 ? bars - 1 : 1) * CW, y: CH * (1 - v) }))
+  let s = `<svg width="${CW}" height="${CH + 20}" viewBox="0 0 ${CW} ${CH + 20}" xmlns="http://www.w3.org/2000/svg" style="display:block">`
+  ;[0, 1, 2, 3, 4].forEach(i => { s += `<line x1="0" y1="${(CH * i / 4).toFixed(1)}" x2="${CW}" y2="${(CH * i / 4).toFixed(1)}" stroke="#262629" stroke-width="1" stroke-dasharray="2,4"/>` })
+  s += `<path d="${svgSmooth(pts)}" fill="none" stroke="${BLUE}" stroke-width="1.6"/>`
+  pts.forEach(p => { s += `<circle cx="${p.x.toFixed(1)}" cy="${p.y.toFixed(1)}" r="2.6" fill="#070708" stroke="${BLUE}" stroke-width="1.6"/>` })
+  const dlLen = chartDates.length
+  chartDates.forEach((lbl, i) => {
+    const lx = dlLen > 1 ? i / (dlLen - 1) * CW : 0
+    const anchor = i === 0 ? 'start' : i === dlLen - 1 ? 'end' : 'middle'
+    s += `<text x="${lx.toFixed(1)}" y="${CH + 14}" font-family="Arial,sans-serif" font-size="7.8" fill="${GRAY}" text-anchor="${anchor}">${escXml(lbl)}</text>`
+  })
+  s += '</svg>'
+  return s
+}
+
+// ─── HTML BUILDERS ───────────────────────────────────────────────────────────
+function loadTemplate(name) {
+  return fs.readFileSync(path.join(__dirname, 'templates', `${name}.html`), 'utf8')
+}
+
+function buildOFHtml(d) {
+  const { curBal, pendBal, periodLabel, dateRange, netAmt, grossAmt, growthPct, cData, cData2, bars, dateLabels } = d
+  const mainSvg = makeOFMainChart(cData, bars)
+  const secSvg  = makeOFSecChart(cData2, bars)
+  const dateHtml = dateLabels.map((l, i) => {
+    const parts = l.split('\n')
+    const style = i === 0 ? 'text-align:left' : i === dateLabels.length - 1 ? 'text-align:right' : 'text-align:center'
+    return `<span style="${style}">${parts.map(p => escXml(p)).join('<br>')}</span>`
+  }).join('')
+  return loadTemplate('OF')
+    .replace('{{CUR_BAL}}',      escXml(curBal))
+    .replace('{{PEND_BAL}}',     escXml(pendBal))
+    .replace('{{PERIOD_LABEL}}', escXml(periodLabel))
+    .replace('{{DATE_RANGE}}',   escXml(dateRange))
+    .replace('{{NET_AMT}}',      escXml(netAmt))
+    .replace('{{GROSS_AMT}}',    escXml(grossAmt))
+    .replace('{{GROWTH_PCT}}',   String(growthPct))
+    .replace('{{CHART_MAIN}}',   mainSvg)
+    .replace('{{CHART_SEC}}',    secSvg)
+    .replace('{{DATE_LABELS}}',  dateHtml)
+}
+
+function buildFanfixHtml(d) {
+  const { revenueAmt, periodLabel, dateLabels } = d
+  return loadTemplate('Fanfix')
+    .replace('{{PERIOD_LABEL}}', escXml(periodLabel))
+    .replace('{{REVENUE_AMT}}',  escXml(revenueAmt))
+    .replace('{{CHART_WAVE}}',   makeFanfixWaveChart(dateLabels))
+    .replace('{{CHART_DONUT}}',  makeFanfixDonut())
+    .replace('{{CHART_BARS}}',   makeFanfixBars(revenueAmt))
+}
+
+function buildFanvueHtml(d) {
+  const { earningsAmt, monthAmt, monthLabel, periodLabel, dateRange, totalAmt, totalDelta, subsAmt, subsDelta, bars } = d
+  return loadTemplate('Fanvue')
+    .replace('{{EARNINGS_AMT}}', escXml(earningsAmt))
+    .replace('{{MONTH_AMT}}',    escXml(monthAmt))
+    .replace('{{MONTH_LABEL}}',  escXml(monthLabel))
+    .replace('{{PERIOD_LABEL}}', escXml(periodLabel))
+    .replace('{{DATE_RANGE}}',   escXml(dateRange))
+    .replace('{{TOTAL_AMT}}',    escXml(totalAmt))
+    .replace('{{TOTAL_DELTA}}',  escXml(totalDelta))
+    .replace('{{SUBS_AMT}}',     escXml(subsAmt))
+    .replace('{{SUBS_DELTA}}',   escXml(subsDelta))
+    .replace('{{SPARK1}}',       makeFanvueSpark(0.4))
+    .replace('{{SPARK2}}',       makeFanvueSpark(2.1))
+    .replace('{{CHART_LINES}}',  makeFanvueChart(bars))
+}
+
+function buildRevealHtml(d) {
+  const { subsAmt, tipsAmt, postsAmt, referralsAmt, messagesAmt, streamsAmt, totalAmt, activeTab, chartDates, bars } = d
+  const tabClass = t => activeTab === t ? 'a' : ''
+  return loadTemplate('Reveal')
+    .replace('{{TOTAL_AMT}}',    escXml(totalAmt))
+    .replace('{{SUBS_AMT}}',     escXml(subsAmt))
+    .replace('{{TIPS_AMT}}',     escXml(tipsAmt))
+    .replace('{{POSTS_AMT}}',    escXml(postsAmt))
+    .replace('{{REFS_AMT}}',     escXml(referralsAmt))
+    .replace('{{MSGS_AMT}}',     escXml(messagesAmt))
+    .replace('{{STREAMS_AMT}}',  escXml(streamsAmt))
+    .replace('{{TAB_YESTERDAY}}', tabClass('Yesterday'))
+    .replace('{{TAB_TODAY}}',     tabClass('Today'))
+    .replace('{{TAB_WEEK}}',      tabClass('This week'))
+    .replace('{{TAB_MONTH}}',     tabClass('This month'))
+    .replace('{{CHART_LINE}}',   makeRevealChart(bars, chartDates))
+}
+
 const DASH_TEMPLATES = new Set(['OF', 'Fanfix', 'Fanvue', 'Reveal'])
 
 app.post('/dashboard/generate', genericLimiter, async (req, res) => {
@@ -2374,7 +2682,7 @@ app.post('/dashboard/generate', genericLimiter, async (req, res) => {
     const growthPct = Math.floor(15 + rng0() * 30)
     const fmtUSD    = v => '$' + v.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
 
-    let svgStr
+    let htmlStr, vpW, vpH
 
     if (tpl === 'OF') {
       // ── OF: pixel-perfect layout matching OF.png ──────────────────────────
@@ -2409,7 +2717,7 @@ app.post('/dashboard/generate', genericLimiter, async (req, res) => {
       // Secondary chart: subscriber-scale daily counts (~200 range for typical gross)
       const cData2 = dashDaily(gross * 0.02, bars, gross + 1)
 
-      svgStr = buildOFSvg({
+      htmlStr = buildOFHtml({
         curBal:     fmtUSD(curBal),
         pendBal:    fmtUSD(pendBal),
         periodLabel: periodEN,
@@ -2419,6 +2727,7 @@ app.post('/dashboard/generate', genericLimiter, async (req, res) => {
         growthPct,
         cData, cData2, bars, dateLabels,
       })
+      vpW = 768; vpH = 1188
     } else if (tpl === 'Fanfix') {
       // ── Fanfix: Content Protection layout matching Fanfix.png ─────────────
       const periodLabel =
@@ -2431,11 +2740,12 @@ app.post('/dashboard/generate', genericLimiter, async (req, res) => {
         return dt.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })
       })
 
-      svgStr = buildFanfixSvg({
+      htmlStr = buildFanfixHtml({
         revenueAmt: fmtUSD(net),
         periodLabel,
         dateLabels,
       })
+      vpW = 1000; vpH = 611
     } else if (tpl === 'Fanvue') {
       // ── Fanvue: dark mobile Insights layout matching Fanvue.png ───────────
       const fmtEN = dt => dt.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })
@@ -2444,7 +2754,7 @@ app.post('/dashboard/generate', genericLimiter, async (req, res) => {
         period === '7d' || period === '1w' ? 'Last 7 Days'   :
         period === 'custom'                ? 'Custom Period' : 'Last 30 Days'
 
-      svgStr = buildFanvueSvg({
+      htmlStr = buildFanvueHtml({
         earningsAmt: fmtUSD(net),
         monthAmt:    fmtUSD(net * 0.128),
         monthLabel:  pEnd.toLocaleDateString('en-US', { month: 'long', year: 'numeric' }),
@@ -2454,9 +2764,9 @@ app.post('/dashboard/generate', genericLimiter, async (req, res) => {
         totalDelta:  '+3.74%',
         subsAmt:     fmtUSD(net * 0.10),
         subsDelta:   '+19.76%',
-        chartStart:  pStart.toLocaleDateString('en-US', { month: 'short', day: 'numeric' }),
-        chartEnd:    pEnd.toLocaleDateString('en-US', { month: 'short', day: 'numeric' }),
+        bars,
       })
+      vpW = 359; vpH = 764
     } else {
       // ── Reveal: dark "Creator earnings overview" layout matching Reveal.png ─
       const activeTab =
@@ -2469,7 +2779,7 @@ app.post('/dashboard/generate', genericLimiter, async (req, res) => {
         return dt.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })
       })
 
-      svgStr = buildRevealSvg({
+      htmlStr = buildRevealHtml({
         totalAmt:     fmtUSD(gross),
         subsAmt:      fmtUSD(gross * 0.1127),
         tipsAmt:      fmtUSD(gross * 0.0790),
@@ -2479,9 +2789,10 @@ app.post('/dashboard/generate', genericLimiter, async (req, res) => {
         streamsAmt:   fmtUSD(0),
         activeTab, chartDates, bars,
       })
+      vpW = 870; vpH = 438
     }
 
-    const pngBuf = await sharp(Buffer.from(svgStr)).png().toBuffer()
+    const pngBuf = await renderHtml(htmlStr, vpW, vpH)
     res.json({ image: `data:image/png;base64,${pngBuf.toString('base64')}` })
   } catch (err) {
     console.error('[dashboard/generate]', err)
