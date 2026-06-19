@@ -4,7 +4,7 @@
 *{box-sizing:border-box;margin:0;padding:0}
 html,body{width:1000px;height:611px;overflow:hidden}
 body{background:linear-gradient(135deg,#dce9fb 0%,#ece3f6 50%,#fbe1ee 100%);font-family:-apple-system,BlinkMacSystemFont,"Helvetica Neue",Arial,sans-serif;-webkit-font-smoothing:antialiased;color:#0a0a0a;display:flex}
-.sb{width:108px;flex-shrink:0;height:611px;background:#fff;display:flex;flex-direction:column;border-right:1px solid rgba(0,0,0,0.06)}
+.sb{width:196px;flex-shrink:0;height:611px;background:#fff;display:flex;flex-direction:column;border-right:1px solid rgba(0,0,0,0.06)}
 .sb-logo{display:flex;align-items:center;gap:8px;padding:14px 14px 8px}
 .sb-av{width:20px;height:20px;border-radius:50%;background:radial-gradient(circle at 35% 35%,#f9a8d4,#a78bfa,#7c3aed);flex-shrink:0}
 .sb-lbl{font-size:12.5px;font-weight:800;letter-spacing:.3px}
@@ -17,7 +17,7 @@ body{background:linear-gradient(135deg,#dce9fb 0%,#ece3f6 50%,#fbe1ee 100%);font
 .sb-mi{display:flex;align-items:center;gap:8px;padding:6px 12px;font-size:10.8px;color:#333;position:relative}
 .sb-ch{position:absolute;right:10px;font-size:11px;color:#bbb}
 .sb-badge{position:absolute;right:8px;top:4px;border-radius:50%;width:14px;height:14px;display:flex;align-items:center;justify-content:center;font-size:8px;color:#fff;font-weight:700}
-.sb-dot{width:12px;height:12px;border-radius:50%;border:1.3px solid #999;flex-shrink:0}
+.sb-icon{width:14px;height:14px;flex-shrink:0;display:inline-flex;align-items:center;justify-content:center}
 .sb-foot{padding:8px 12px 6px;border-top:1px solid #eee;font-size:10.5px;color:#666;line-height:2}
 .sb-foot span{display:block;color:#888}
 .sb-hide{font-size:10px;color:#999;padding:6px 12px 8px}
@@ -56,17 +56,17 @@ body{background:linear-gradient(135deg,#dce9fb 0%,#ece3f6 50%,#fbe1ee 100%);font
   <div class="sb-user"><div class="sb-uav"></div><div><div class="sb-un">Hi, john</div><span class="sb-share">Share profile ↗</span></div></div>
   <div class="sb-create">+ Create</div>
   <div class="sb-menu">
-    <div class="sb-mi"><div class="sb-dot"></div>Insights</div>
-    <div class="sb-mi"><div class="sb-dot"></div>Analytics<span class="sb-ch">›</span></div>
-    <div class="sb-mi"><div class="sb-dot"></div>Messages<span class="sb-badge" style="background:#3b82f6">3</span></div>
-    <div class="sb-mi"><div class="sb-dot"></div>Memberships<span class="sb-ch">›</span></div>
-    <div class="sb-mi"><div class="sb-dot"></div>Notifications<span class="sb-badge" style="background:#7c3aed">7</span></div>
-    <div class="sb-mi"><div class="sb-dot"></div>Vault</div>
-    <div class="sb-mi"><div class="sb-dot"></div>Scheduler</div>
-    <div class="sb-mi"><div class="sb-dot"></div>Community<span class="sb-ch">›</span></div>
+    <div class="sb-mi"><div class="sb-icon"><svg width="13" height="11" viewBox="0 0 13 11" fill="none"><polyline points="1,10 4.5,5 7.5,7.5 12,1" stroke="#555" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/></svg></div>Insights</div>
+    <div class="sb-mi"><div class="sb-icon"><svg width="13" height="11" viewBox="0 0 13 11" fill="none"><rect x="0.5" y="6" width="2.8" height="5" rx="0.6" fill="#555"/><rect x="5" y="3" width="2.8" height="8" rx="0.6" fill="#555"/><rect x="9.5" y="0.5" width="2.8" height="10.5" rx="0.6" fill="#555"/></svg></div>Analytics<span class="sb-ch">›</span></div>
+    <div class="sb-mi"><div class="sb-icon"><svg width="13" height="12" viewBox="0 0 13 12" fill="none"><path d="M1 1 L12 1 L12 8 L8 8 L6.5 11 L6.5 8 L1 8 Z" stroke="#555" stroke-width="1.2" stroke-linejoin="round"/></svg></div>Messages<span class="sb-badge" style="background:#3b82f6">3</span></div>
+    <div class="sb-mi"><div class="sb-icon"><svg width="12" height="13" viewBox="0 0 12 13" fill="none"><circle cx="6" cy="4.5" r="3.2" stroke="#555" stroke-width="1.2"/><path d="M3.2 7.5 L1.5 13 L6 11 L10.5 13 L8.8 7.5" stroke="#555" stroke-width="1.2" stroke-linejoin="round"/></svg></div>Memberships<span class="sb-ch">›</span></div>
+    <div class="sb-mi"><div class="sb-icon"><svg width="12" height="13" viewBox="0 0 12 13" fill="none"><path d="M6 1.5 C3.5 1.5 2 3.5 2 5.5 L2 8.5 L0.5 10 L0.5 11 L11.5 11 L11.5 10 L10 8.5 L10 5.5 C10 3.5 8.5 1.5 6 1.5Z" stroke="#555" stroke-width="1.2"/><path d="M4.5 11 C4.5 11.8 5.2 12.5 6 12.5 C6.8 12.5 7.5 11.8 7.5 11" stroke="#555" stroke-width="1.2"/></svg></div>Notifications<span class="sb-badge" style="background:#7c3aed">7</span></div>
+    <div class="sb-mi"><div class="sb-icon"><svg width="13" height="13" viewBox="0 0 13 13" fill="none"><rect x="1" y="1" width="11" height="11" rx="2" stroke="#555" stroke-width="1.2"/><circle cx="6" cy="6.5" r="2" stroke="#555" stroke-width="1.2"/><line x1="9.5" y1="4.5" x2="9.5" y2="6" stroke="#555" stroke-width="1.3" stroke-linecap="round"/><line x1="9.5" y1="7.5" x2="9.5" y2="9" stroke="#555" stroke-width="1.3" stroke-linecap="round"/></svg></div>Vault</div>
+    <div class="sb-mi"><div class="sb-icon"><svg width="13" height="13" viewBox="0 0 13 13" fill="none"><rect x="1" y="2.5" width="11" height="10" rx="1.5" stroke="#555" stroke-width="1.2"/><line x1="1" y1="6" x2="12" y2="6" stroke="#555" stroke-width="1.2"/><line x1="4.5" y1="1" x2="4.5" y2="4" stroke="#555" stroke-width="1.5" stroke-linecap="round"/><line x1="8.5" y1="1" x2="8.5" y2="4" stroke="#555" stroke-width="1.5" stroke-linecap="round"/></svg></div>Scheduler</div>
+    <div class="sb-mi"><div class="sb-icon"><svg width="14" height="11" viewBox="0 0 14 11" fill="none"><circle cx="5" cy="3.5" r="2.2" stroke="#555" stroke-width="1.2"/><path d="M0.5 11 C0.5 8 9.5 8 9.5 11" stroke="#555" stroke-width="1.2"/><circle cx="10.5" cy="3.5" r="1.7" stroke="#555" stroke-width="1.2"/><path d="M9.5 11 C10 9.5 13.5 9.5 13.5 11" stroke="#555" stroke-width="1.2"/></svg></div>Community<span class="sb-ch">›</span></div>
   </div>
-  <div class="sb-foot">Settings <span>Contact Us</span><span>Sign Out</span></div>
-  <div class="sb-hide">Hide menu</div>
+  <div class="sb-foot"><div class="sb-mi" style="padding:5px 12px"><div class="sb-icon"><svg width="13" height="13" viewBox="0 0 13 13" fill="none"><circle cx="6.5" cy="6.5" r="2" stroke="#666" stroke-width="1.2"/><path d="M6.5 1.5 L6.5 2.8 M6.5 10.2 L6.5 11.5 M1.5 6.5 L2.8 6.5 M10.2 6.5 L11.5 6.5 M3.1 3.1 L4 4 M9 9 L9.9 9.9 M9.9 3.1 L9 4 M4 9 L3.1 9.9" stroke="#666" stroke-width="1.2" stroke-linecap="round"/></svg></div>Settings</div><span style="display:block;padding:4px 12px;font-size:10.5px;color:#666">Contact Us</span><span style="display:block;padding:4px 12px;font-size:10.5px;color:#666">Sign Out</span></div>
+  <div class="sb-hide"><svg width="14" height="12" viewBox="0 0 14 12" fill="none"><line x1="1" y1="2" x2="7" y2="2" stroke="#999" stroke-width="1.2" stroke-linecap="round"/><line x1="1" y1="6" x2="7" y2="6" stroke="#999" stroke-width="1.2" stroke-linecap="round"/><line x1="1" y1="10" x2="7" y2="10" stroke="#999" stroke-width="1.2" stroke-linecap="round"/><polyline points="10,4 13,6 10,8" fill="none" stroke="#999" stroke-width="1.2" stroke-linecap="round" stroke-linejoin="round"/></svg> Hide menu</div>
 </div>
 <div class="main">
   <div class="mh"><div class="mh-t">Content Protection</div><div class="mh-s">World's most powerful AI powered detection and removal!</div></div>
@@ -104,7 +104,16 @@ body{background:linear-gradient(135deg,#dce9fb 0%,#ece3f6 50%,#fbe1ee 100%);font
       </div>
     </div>
     <div class="r2-card">
-      <div><span class="r2-rt">Total: {{REVENUE_AMT}}</span><div class="r2-t">Potential Revenue</div><div class="r2-t">Saved</div></div>
+      <div style="display:flex;align-items:flex-start;justify-content:space-between;margin-bottom:2px">
+        <div>
+          <div style="display:flex;align-items:center;gap:5px">
+            <div class="r2-t">Potential Revenue</div>
+            <div style="width:13px;height:13px;border-radius:50%;background:#22c55e;display:inline-flex;align-items:center;justify-content:center;flex-shrink:0"><svg width="7" height="8" viewBox="0 0 7 8" fill="none"><text x="3.5" y="6.5" font-size="7" fill="#fff" font-weight="700" text-anchor="middle">$</text></svg></div>
+          </div>
+          <div class="r2-t">Saved</div>
+        </div>
+        <span class="r2-rt" style="float:none">Total: {{REVENUE_AMT}}</span>
+      </div>
       {{CHART_BARS}}
     </div>
     <div class="r2-card">

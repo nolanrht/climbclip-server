@@ -2553,26 +2553,51 @@ function makeFanvueChart(bars) {
   return s
 }
 
-function makeRevealChart(bars, chartDates) {
-  const CW = 500, CH = 90
-  const BLUE = '#3b82f6', GRAY = '#8a8a8e'
-  const SHAPE = [0.75, 0.48, 0.57, 0.80, 0.74, 0.36, 0.50, 0.02, 0, 0, 0, 0, 0, 0, 0]
+function makeRevealChart(bars, chartDates, chartMax, seed) {
+  const YLBL_W = 38, CPR = 4
+  const CW = 490, CH = 130, PW = CW - YLBL_W - CPR
+  const BLUE = '#3b82f6', GRAY = '#8a8a8e', GRID = '#262629'
+  const yMax = chartMax || 2000
+  // Seeded shape: activity peak then drop to 0 — matches real Inflow/Reveal look
+  const rngS = seededRng(seed || Math.round(yMax))
+  const peakPos   = 3 + Math.floor(rngS() * 3)   // peak at index 3-5
+  const peakH     = 0.78 + rngS() * 0.18          // peak height 0.78-0.96
+  const dropStart = peakPos + 2 + Math.floor(rngS() * 2)  // drop starts 2-3 after peak
+  const SHAPE = Array.from({ length: 15 }, (_, i) => {
+    if (i < peakPos) return peakH * (0.5 + 0.5 * (i / peakPos)) * (0.85 + rngS() * 0.15)
+    if (i === peakPos) return peakH
+    if (i <= dropStart) return peakH * (0.9 - 0.15 * (i - peakPos)) * (0.9 + rngS() * 0.1)
+    if (i === dropStart + 1) return 0.04 + rngS() * 0.06
+    return 0
+  })
   const resample = (arr, n) => Array.from({ length: n }, (_, i) => {
     const t = n > 1 ? i / (n - 1) * (arr.length - 1) : 0
     const i0 = Math.floor(t), i1 = Math.min(i0 + 1, arr.length - 1), f = t - i0
     return arr[i0] * (1 - f) + arr[i1] * f
   })
   const vals = resample(SHAPE, bars)
-  const pts = vals.map((v, i) => ({ x: i / (bars > 1 ? bars - 1 : 1) * CW, y: CH * (1 - v) }))
-  let s = `<svg width="${CW}" height="${CH + 20}" viewBox="0 0 ${CW} ${CH + 20}" xmlns="http://www.w3.org/2000/svg" style="display:block">`
-  ;[0, 1, 2, 3, 4].forEach(i => { s += `<line x1="0" y1="${(CH * i / 4).toFixed(1)}" x2="${CW}" y2="${(CH * i / 4).toFixed(1)}" stroke="#262629" stroke-width="1" stroke-dasharray="2,4"/>` })
-  s += `<path d="${svgSmooth(pts)}" fill="none" stroke="${BLUE}" stroke-width="1.6"/>`
-  pts.forEach(p => { s += `<circle cx="${p.x.toFixed(1)}" cy="${p.y.toFixed(1)}" r="2.6" fill="#070708" stroke="${BLUE}" stroke-width="1.6"/>` })
+  const pts = vals.map((v, i) => ({
+    x: YLBL_W + (bars > 1 ? i / (bars - 1) : 0) * PW,
+    y: CH * (1 - Math.max(0, Math.min(1, v))),
+  }))
+  const TOTAL_H = CH + 18
+  let s = `<svg width="${CW}" height="${TOTAL_H}" viewBox="0 0 ${CW} ${TOTAL_H}" xmlns="http://www.w3.org/2000/svg" style="display:block;width:100%">`
+  // Y-axis grid lines + labels
+  const yLevels = [0, 0.25, 0.5, 0.75, 1]
+  yLevels.forEach(f => {
+    const gy = (CH * (1 - f)).toFixed(1)
+    s += `<line x1="${YLBL_W}" y1="${gy}" x2="${CW - CPR}" y2="${gy}" stroke="${GRID}" stroke-width="0.8" stroke-dasharray="2,4"/>`
+    const labelVal = Math.round(yMax * f)
+    s += `<text x="${(YLBL_W - 4).toFixed(1)}" y="${(parseFloat(gy) + 3.5).toFixed(1)}" font-family="Arial,sans-serif" font-size="8" fill="${GRAY}" text-anchor="end">${labelVal}</text>`
+  })
+  s += `<path d="${svgSmooth(pts)}" fill="none" stroke="${BLUE}" stroke-width="1.8"/>`
+  pts.forEach(p => { s += `<circle cx="${p.x.toFixed(1)}" cy="${p.y.toFixed(1)}" r="2.8" fill="#070708" stroke="${BLUE}" stroke-width="1.6"/>` })
+  // X-axis date labels
   const dlLen = chartDates.length
   chartDates.forEach((lbl, i) => {
-    const lx = dlLen > 1 ? i / (dlLen - 1) * CW : 0
+    const lx = YLBL_W + (dlLen > 1 ? i / (dlLen - 1) : 0) * PW
     const anchor = i === 0 ? 'start' : i === dlLen - 1 ? 'end' : 'middle'
-    s += `<text x="${lx.toFixed(1)}" y="${CH + 14}" font-family="Arial,sans-serif" font-size="7.8" fill="${GRAY}" text-anchor="${anchor}">${escXml(lbl)}</text>`
+    s += `<text x="${lx.toFixed(1)}" y="${CH + 13}" font-family="Arial,sans-serif" font-size="7.8" fill="${GRAY}" text-anchor="${anchor}">${escXml(lbl)}</text>`
   })
   s += '</svg>'
   return s
@@ -2633,7 +2658,7 @@ function buildFanvueHtml(d) {
 }
 
 function buildRevealHtml(d) {
-  const { subsAmt, tipsAmt, postsAmt, referralsAmt, messagesAmt, streamsAmt, totalAmt, activeTab, chartDates, bars } = d
+  const { subsAmt, tipsAmt, postsAmt, referralsAmt, messagesAmt, streamsAmt, totalAmt, activeTab, chartDates, bars, chartMax, seed } = d
   const tabClass = t => activeTab === t ? 'a' : ''
   return loadTemplate('Reveal')
     .replace('{{TOTAL_AMT}}',    escXml(totalAmt))
@@ -2647,7 +2672,7 @@ function buildRevealHtml(d) {
     .replace('{{TAB_TODAY}}',     tabClass('Today'))
     .replace('{{TAB_WEEK}}',      tabClass('This week'))
     .replace('{{TAB_MONTH}}',     tabClass('This month'))
-    .replace('{{CHART_LINE}}',   makeRevealChart(bars, chartDates))
+    .replace('{{CHART_LINE}}',   makeRevealChart(bars, chartDates, chartMax, seed))
 }
 
 const DASH_TEMPLATES = new Set(['OF', 'Fanfix', 'Fanvue', 'Reveal'])
@@ -2674,13 +2699,24 @@ app.post('/dashboard/generate', genericLimiter, async (req, res) => {
       pStart = new Date(now - 30 * 86400000); pEnd = now
     }
 
-    // Shared financials (seeded)
-    const rng0      = seededRng(gross)
-    const net       = tpl === 'Reveal' ? gross : gross * 0.80
-    const curBal    = gross * (0.06 + rng0() * 0.04)
-    const pendBal   = gross * (0.22 + rng0() * 0.08)
+    // Organic ±15% variation — seeded so same input always yields same result
+    const orgRng     = seededRng(Math.round(Math.abs(gross) * 137 + 31337))
+    const orgPct     = (orgRng() - 0.5) * 0.30
+    const orgRaw     = gross * (1 + orgPct)
+    const CENTS_POOL = [12,17,21,28,34,38,43,47,52,58,61,67,72,76,83,87,91,94,97]
+    const orgCents   = CENTS_POOL[Math.floor(orgRng() * CENTS_POOL.length)]
+    const displayGross = Math.floor(orgRaw) + orgCents / 100
+
+    // Shared financials (seeded from displayGross)
+    const rng0      = seededRng(Math.round(displayGross * 1000))
+    // Helper: round to cents
+    const r2 = v => Math.round(v * 100) / 100
+    const net       = tpl === 'Reveal' ? displayGross : r2(displayGross * 0.80)
+    const curBal    = r2(displayGross * (0.06 + rng0() * 0.04))
+    const pendBal   = r2(displayGross * (0.22 + rng0() * 0.08))
     const growthPct = Math.floor(15 + rng0() * 30)
-    const fmtUSD    = v => '$' + v.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
+    const fmtUSD    = v => '$' + Number(v).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
+    const fmtFV     = v => '$ ' + Number(v).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
 
     let htmlStr, vpW, vpH
 
@@ -2713,9 +2749,9 @@ app.post('/dashboard/generate', genericLimiter, async (req, res) => {
       })
 
       // Daily net values summing to net (chart shows per-day earnings)
-      const cData  = dashDaily(net, bars, gross)
-      // Secondary chart: subscriber-scale daily counts (~200 range for typical gross)
-      const cData2 = dashDaily(gross * 0.02, bars, gross + 1)
+      const cData  = dashDaily(net, bars, displayGross)
+      // Secondary chart: subscriber-scale daily counts
+      const cData2 = dashDaily(displayGross * 0.02, bars, displayGross + 1)
 
       htmlStr = buildOFHtml({
         curBal:     fmtUSD(curBal),
@@ -2723,7 +2759,7 @@ app.post('/dashboard/generate', genericLimiter, async (req, res) => {
         periodLabel: periodEN,
         dateRange:  dateRangeEN,
         netAmt:     fmtUSD(net),
-        grossAmt:   fmtUSD(gross),
+        grossAmt:   fmtUSD(displayGross),
         growthPct,
         cData, cData2, bars, dateLabels,
       })
@@ -2754,16 +2790,29 @@ app.post('/dashboard/generate', genericLimiter, async (req, res) => {
         period === '7d' || period === '1w' ? 'Last 7 Days'   :
         period === 'custom'                ? 'Custom Period' : 'Last 30 Days'
 
+      // Period fraction: 30-day period = reference unit
+      const fvPeriodFrac =
+        period === '24h'                   ? 1/30 :
+        (period === '7d' || period === '1w') ? 7/30 :
+        period === 'custom'                ? Math.min(bars, 30) / 30 : 1
+      // Period total (in summary rows) — coherent with period selected
+      const fvTotal  = r2(net * (0.14 + rng0() * 0.04) * fvPeriodFrac)
+      const fvSubs   = r2(fvTotal * (0.48 + rng0() * 0.10))
+      const fvTDelta = '+$' + Math.round(fvTotal * (0.035 + rng0() * 0.03)).toLocaleString('en-US')
+      const fvSDelta = '+' + (fvSubs * (0.08 + rng0() * 0.05)).toFixed(1)
+      // "This month" shows monthly share of earnings (always full month basis)
+      const fvMonthAmt = r2(net * (0.11 + rng0() * 0.04))
+
       htmlStr = buildFanvueHtml({
-        earningsAmt: fmtUSD(net),
-        monthAmt:    fmtUSD(net * 0.128),
+        earningsAmt: fmtFV(net),
+        monthAmt:    fmtFV(fvMonthAmt),
         monthLabel:  pEnd.toLocaleDateString('en-US', { month: 'long', year: 'numeric' }),
         periodLabel,
         dateRange:   `${fmtEN(pStart)} - ${fmtEN(pEnd)}`,
-        totalAmt:    fmtUSD(net * 0.192),
-        totalDelta:  '+3.74%',
-        subsAmt:     fmtUSD(net * 0.10),
-        subsDelta:   '+19.76%',
+        totalAmt:    fmtFV(fvTotal),
+        totalDelta:  fvTDelta,
+        subsAmt:     fmtFV(fvSubs),
+        subsDelta:   fvSDelta,
         bars,
       })
       vpW = 359; vpH = 764
@@ -2779,14 +2828,25 @@ app.post('/dashboard/generate', genericLimiter, async (req, res) => {
         return dt.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })
       })
 
+      // rvMax: Y-axis ceiling — peak of chart corresponds to displayGross/bars * peak_factor
+      const rvDailyAvg = displayGross / Math.max(bars, 1)
+      const rvMax = Math.round(roundToNice(rvDailyAvg * 3.5))
+
+      // Sub-amounts — compute last one as exact remainder to avoid rounding drift
+      const rvSubs = r2(displayGross * 0.1127)
+      const rvTips = r2(displayGross * 0.0790)
+      const rvMsgs = r2(r2(displayGross) - rvSubs - rvTips)  // exact remainder
+
       htmlStr = buildRevealHtml({
-        totalAmt:     fmtUSD(gross),
-        subsAmt:      fmtUSD(gross * 0.1127),
-        tipsAmt:      fmtUSD(gross * 0.0790),
+        totalAmt:     fmtUSD(displayGross),
+        subsAmt:      fmtUSD(rvSubs),
+        tipsAmt:      fmtUSD(rvTips),
         postsAmt:     fmtUSD(0),
         referralsAmt: fmtUSD(0),
-        messagesAmt:  fmtUSD(gross * 0.8083),
+        messagesAmt:  fmtUSD(rvMsgs),
         streamsAmt:   fmtUSD(0),
+        chartMax:     rvMax,
+        seed:         Math.round(displayGross * 1000),
         activeTab, chartDates, bars,
       })
       vpW = 870; vpH = 438

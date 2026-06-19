@@ -31,14 +31,15 @@ body{font-family:-apple-system,BlinkMacSystemFont,"Helvetica Neue",Roboto,Arial,
 .pe-d{font-size:13px;color:#9e9e9e}
 .pe-ch{position:absolute;top:20px;right:20px;font-size:22px;color:#9e9e9e;line-height:1}
 .ft{display:flex;gap:8px;padding:15px 20px;background:#fff;height:66px;align-items:center}
-.er{height:56px;background:#fff;padding:0 20px;display:flex;align-items:center;gap:10px}
-.en{font-size:30px;font-weight:700;color:#1a1a1a;letter-spacing:-.02em}
-.eg{font-size:20px;color:#00aff0}
-.eb{background:#e8f7ef;color:#44b37e;font-size:14px;font-weight:600;padding:3px 10px;border-radius:5px}
-.da{display:flex;justify-content:space-between;padding:8px 34px;border-bottom:1px solid #e5e5e5;height:64px;align-items:center}
+.er{height:56px;background:#fff;padding:0 20px;display:flex;align-items:center;gap:8px;flex-wrap:nowrap;overflow:hidden}
+.en{font-size:28px;font-weight:700;color:#1a1a1a;letter-spacing:-.02em;white-space:nowrap}
+.eg{font-size:18px;color:#00aff0;white-space:nowrap}
+.eb{background:#e8f7ef;color:#44b37e;font-size:13px;font-weight:600;padding:3px 9px;border-radius:6px;white-space:nowrap}
+.da{display:flex;justify-content:space-between;padding:8px 20px;border-bottom:1px solid #e5e5e5;height:64px;align-items:center}
 .da span{font-size:13px;color:#9e9e9e;text-align:center;line-height:1.4}
 .bn{height:76px;background:#fff;display:flex;align-items:center;justify-content:space-around;border-top:1px solid #e5e5e5}
-.bb{height:56px;background:#f2f2f2;display:flex;align-items:center;justify-content:center;gap:6px;font-size:15px;color:#333;font-weight:500}
+.bb{height:56px;background:#f2f2f2;display:flex;align-items:center;justify-content:space-between;padding:0 18px;font-size:15px;color:#333;font-weight:500}
+.bb-center{display:flex;align-items:center;gap:6px}
 </style></head>
 <body>
 <div class="nt">
@@ -92,7 +93,11 @@ body{font-family:-apple-system,BlinkMacSystemFont,"Helvetica Neue",Roboto,Arial,
   <svg width="28" height="28" viewBox="0 0 28 28" fill="none"><circle cx="14" cy="10" r="6" stroke="#9e9e9e" stroke-width="2"/><path d="M3 26 C3 20 25 20 25 26" stroke="#9e9e9e" stroke-width="2" fill="none"/></svg>
 </div>
 <div class="bb">
-  <svg width="14" height="16" viewBox="0 0 14 16" fill="none"><rect x="1.5" y="7" width="11" height="8" rx="1.5" stroke="#444" stroke-width="1.5"/><path d="M4 7 L4 5 C4 3.3 5.3 2 7 2 C8.7 2 10 3.3 10 5 L10 7" stroke="#444" stroke-width="1.5" fill="none"/></svg>
-  <span>onlyfans.com</span>
+  <span style="font-size:14px;font-weight:600;color:#444;letter-spacing:-.5px">AA</span>
+  <div class="bb-center">
+    <svg width="14" height="16" viewBox="0 0 14 16" fill="none"><rect x="1.5" y="7" width="11" height="8" rx="1.5" stroke="#444" stroke-width="1.5"/><path d="M4 7 L4 5 C4 3.3 5.3 2 7 2 C8.7 2 10 3.3 10 5 L10 7" stroke="#444" stroke-width="1.5" fill="none"/></svg>
+    <span style="font-size:15px;color:#333">onlyfans.com</span>
+  </div>
+  <svg width="18" height="18" viewBox="0 0 18 18" fill="none"><path d="M15 9 C15 12.3 12.3 15 9 15 C5.7 15 3 12.3 3 9 C3 5.7 5.7 3 9 3 C11 3 12.8 3.9 14 5.3" stroke="#444" stroke-width="1.6" stroke-linecap="round"/><polyline points="12,2.5 14,5.3 11,6" stroke="#444" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>
 </div>
 </body></html>
