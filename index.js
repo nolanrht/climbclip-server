@@ -1618,35 +1618,45 @@ function dashDaily(total, n, seed) {
   return pts.map(v => (v / sum) * total)
 }
 
-// Organic daily values: stable baseline, max ±8% step, 2-3 natural peaks
+// Organic daily values: ±15% step, 4-5 peaks + 2-3 dips alternating, upward trend
 function dashOrganic(total, n, seed) {
   if (n <= 0) return []
   if (n === 1) return [total]
   const rng  = seededRng(seed !== undefined ? seed : Math.round(total))
   const base = total / n
 
-  // Evenly-spaced peaks with jitter (fewer peaks for short periods)
-  const numPeaks = n < 10 ? 1 : 2 + Math.floor(rng() * 2)
-  const spacing  = Math.floor(n / (numPeaks + 1))
-  const peaks = new Set(Array.from({ length: numPeaks }, (_, k) => {
-    const center = spacing * (k + 1)
-    const jitter = Math.floor((rng() - 0.5) * Math.max(1, spacing * 0.5))
-    return Math.max(1, Math.min(n - 2, center + jitter))
-  }))
-  const nearPeaks = new Set([...peaks].flatMap(p => [p - 1, p, p + 1]))
+  // Build alternating P-D-P-D-P-P sequence (peaks and dips never consecutive)
+  const numPeaks = n < 10 ? 1 + Math.floor(rng() * 2) : 4 + Math.floor(rng() * 2)
+  const numDips  = n < 10 ? Math.floor(rng() * 2)      : 2 + Math.floor(rng() * 2)
+  const seq = []
+  let pi = 0, di = 0
+  while (pi < numPeaks || di < numDips) {
+    if (pi <= di && pi < numPeaks)       { seq.push('P'); pi++ }
+    else if (di < numDips)               { seq.push('D'); di++ }
+    else                                  { seq.push('P'); pi++ }
+  }
 
-  // Random walk: max ±8% change per step, peak +10-20% above base
-  let prev = base * (0.94 + rng() * 0.12)
+  // Space events evenly with small jitter
+  const step = n / (seq.length + 1)
+  const evMap = new Map(seq.map((type, k) => {
+    const center = Math.round(step * (k + 1))
+    const jitter = Math.round((rng() - 0.5) * Math.max(1, step * 0.35))
+    return [Math.max(1, Math.min(n - 2, center + jitter)), type]
+  }))
+
+  // Random walk: max ±15% per step, gentle +6% upward trend
+  let prev = base * (0.95 + rng() * 0.10)
   const raw = []
   for (let i = 0; i < n; i++) {
-    const trendMult = 1.0 + 0.05 * (i / (n - 1))
-    const peakMult  = peaks.has(i)     ? (1.10 + rng() * 0.10)
-                    : nearPeaks.has(i) ? (1.03 + rng() * 0.04) : 1.0
-    const jitter    = 0.96 + rng() * 0.08
-    const target    = base * trendMult * peakMult * jitter
-    const maxDelta  = prev * 0.08
-    const clamped   = Math.max(prev - maxDelta, Math.min(prev + maxDelta, target))
-    prev = Math.max(base * 0.75, Math.min(base * 1.40, clamped))
+    const trend  = 1.0 + 0.06 * (i / (n - 1))
+    const ev     = evMap.get(i)
+    const evMult = ev === 'P' ? (1.12 + rng() * 0.10)
+                 : ev === 'D' ? (0.82 + rng() * 0.06) : 1.0
+    const jitter = 0.96 + rng() * 0.08
+    const target = base * trend * evMult * jitter
+    const maxΔ   = prev * 0.15
+    prev = Math.max(base * 0.68, Math.min(base * 1.48,
+           Math.max(prev - maxΔ, Math.min(prev + maxΔ, target))))
     raw.push(prev)
   }
   const sum = raw.reduce((a, b) => a + b, 0)
@@ -2465,7 +2475,7 @@ function makeOFMainChart(cData, bars) {
 }
 
 function makeOFSecChart(cData2, bars) {
-  const W = 768, C2H = 62, C2PL = 8, C2PR = 68, C2PT = 7, C2PB = 5
+  const W = 768, C2H = 50, C2PL = 8, C2PR = 68, C2PT = 8, C2PB = 4
   const C2PW = W - C2PL - C2PR, C2PH = C2H - C2PT - C2PB
   const LGR = '#9e9e9e', BDR = '#e5e5e5'
   const maxV2 = Math.max(...cData2, 1)
@@ -2481,8 +2491,8 @@ function makeOFSecChart(cData2, bars) {
   s += `<line x1="0" y1="0" x2="${W}" y2="0" stroke="${BDR}" stroke-width="0.8"/>`
   s += `<path d="${c2Fill}" fill="rgba(0,0,0,0.05)"/>`
   s += `<path d="${c2Line}" fill="none" stroke="#aaaaaa" stroke-width="2" stroke-linejoin="miter"/>`
-  s += `<text x="${W - C2PR + 10}" y="${C2PT + 4}" font-family="Arial,sans-serif" font-size="13" fill="${LGR}">${Math.round(y2Top)}</text>`
-  s += `<text x="${W - C2PR + 10}" y="${(C2PT + C2PH * 0.5 + 4).toFixed(1)}" font-family="Arial,sans-serif" font-size="13" fill="${LGR}">${Math.round(y2Top / 2)}</text>`
+  s += `<text x="${W - C2PR + 10}" y="${C2PT + 3}" font-family="Arial,sans-serif" font-size="11" fill="${LGR}">${Math.round(y2Top)}</text>`
+  s += `<text x="${W - C2PR + 10}" y="${(C2PT + C2PH * 0.5 + 3).toFixed(1)}" font-family="Arial,sans-serif" font-size="11" fill="${LGR}">${Math.round(y2Top / 2)}</text>`
   s += '</svg>'
   return s
 }
@@ -2803,7 +2813,7 @@ app.post('/dashboard/generate', genericLimiter, async (req, res) => {
         growthPct,
         cData, cData2, bars, dateLabels,
       })
-      vpW = 768; vpH = 1194
+      vpW = 768; vpH = 1190
     } else if (tpl === 'Fanfix') {
       // ── Fanfix: Content Protection layout matching Fanfix.png ─────────────
       const periodLabel =
