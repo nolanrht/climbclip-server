@@ -1618,6 +1618,41 @@ function dashDaily(total, n, seed) {
   return pts.map(v => (v / sum) * total)
 }
 
+// Organic daily values: stable baseline, max ±8% step, 2-3 natural peaks
+function dashOrganic(total, n, seed) {
+  if (n <= 0) return []
+  if (n === 1) return [total]
+  const rng  = seededRng(seed !== undefined ? seed : Math.round(total))
+  const base = total / n
+
+  // Evenly-spaced peaks with jitter (fewer peaks for short periods)
+  const numPeaks = n < 10 ? 1 : 2 + Math.floor(rng() * 2)
+  const spacing  = Math.floor(n / (numPeaks + 1))
+  const peaks = new Set(Array.from({ length: numPeaks }, (_, k) => {
+    const center = spacing * (k + 1)
+    const jitter = Math.floor((rng() - 0.5) * Math.max(1, spacing * 0.5))
+    return Math.max(1, Math.min(n - 2, center + jitter))
+  }))
+  const nearPeaks = new Set([...peaks].flatMap(p => [p - 1, p, p + 1]))
+
+  // Random walk: max ±8% change per step, peak +10-20% above base
+  let prev = base * (0.94 + rng() * 0.12)
+  const raw = []
+  for (let i = 0; i < n; i++) {
+    const trendMult = 1.0 + 0.05 * (i / (n - 1))
+    const peakMult  = peaks.has(i)     ? (1.10 + rng() * 0.10)
+                    : nearPeaks.has(i) ? (1.03 + rng() * 0.04) : 1.0
+    const jitter    = 0.96 + rng() * 0.08
+    const target    = base * trendMult * peakMult * jitter
+    const maxDelta  = prev * 0.08
+    const clamped   = Math.max(prev - maxDelta, Math.min(prev + maxDelta, target))
+    prev = Math.max(base * 0.75, Math.min(base * 1.40, clamped))
+    raw.push(prev)
+  }
+  const sum = raw.reduce((a, b) => a + b, 0)
+  return raw.map(v => (v / sum) * total)
+}
+
 // Round up to a clean Y-axis ceiling value
 function roundToNice(val) {
   if (val <= 0) return 100
@@ -2430,7 +2465,7 @@ function makeOFMainChart(cData, bars) {
 }
 
 function makeOFSecChart(cData2, bars) {
-  const W = 768, C2H = 98, C2PL = 8, C2PR = 68, C2PT = 10, C2PB = 8
+  const W = 768, C2H = 62, C2PL = 8, C2PR = 68, C2PT = 7, C2PB = 5
   const C2PW = W - C2PL - C2PR, C2PH = C2H - C2PT - C2PB
   const LGR = '#9e9e9e', BDR = '#e5e5e5'
   const maxV2 = Math.max(...cData2, 1)
@@ -2753,10 +2788,10 @@ app.post('/dashboard/generate', genericLimiter, async (req, res) => {
         return fmtXLbl(dt)
       })
 
-      // Daily net values summing to net (chart shows per-day earnings)
-      const cData  = dashDaily(net, bars, displayGross)
-      // Secondary chart: subscriber-scale daily counts
-      const cData2 = dashDaily(displayGross * 0.02, bars, displayGross + 1)
+      // Daily net values: organic shape (stable ±8%, 2-3 natural peaks)
+      const cData  = dashOrganic(net, bars, Math.round(displayGross))
+      // Secondary chart: engagement-scale counts, organic shape
+      const cData2 = dashOrganic(displayGross * 0.02, bars, Math.round(displayGross) + 1)
 
       htmlStr = buildOFHtml({
         curBal:     fmtUSD(curBal),
@@ -2768,7 +2803,7 @@ app.post('/dashboard/generate', genericLimiter, async (req, res) => {
         growthPct,
         cData, cData2, bars, dateLabels,
       })
-      vpW = 768; vpH = 1196
+      vpW = 768; vpH = 1194
     } else if (tpl === 'Fanfix') {
       // ── Fanfix: Content Protection layout matching Fanfix.png ─────────────
       const periodLabel =
