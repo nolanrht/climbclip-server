@@ -1633,6 +1633,11 @@ function escXml(s) {
   return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
 }
 
+// Straight polyline path from [{x,y}] points (M...L...L...)
+function svgLine(pts) {
+  return pts.map((p, i) => `${i === 0 ? 'M' : 'L'} ${p.x.toFixed(1)} ${p.y.toFixed(1)}`).join(' ')
+}
+
 // Quadratic bezier midpoint path from [{x,y}] points
 function svgSmooth(pts) {
   let d = `M ${pts[0].x.toFixed(1)} ${pts[0].y.toFixed(1)}`
@@ -2410,7 +2415,7 @@ function makeOFMainChart(cData, bars) {
     x: CPL + (bars > 1 ? i / (bars - 1) : 0) * CPW,
     y: CPT + (1 - v / yTop) * CPH,
   }))
-  const cLine = svgSmooth(cPts)
+  const cLine = svgLine(cPts)
   const cFill = cLine + ` L ${cPts[cPts.length - 1].x.toFixed(1)} ${(CPT + CPH).toFixed(1)} L ${CPL} ${(CPT + CPH).toFixed(1)} Z`
   let s = `<svg width="${W}" height="${CH}" viewBox="0 0 ${W} ${CH}" xmlns="http://www.w3.org/2000/svg" style="display:block;flex-shrink:0">`
   s += `<rect width="${W}" height="${CH}" fill="#f0faff"/>`
@@ -2418,7 +2423,7 @@ function makeOFMainChart(cData, bars) {
   for (let i = 1; i <= 4; i++) { const gx = CPL + CPW * i / 5; s += `<line x1="${gx.toFixed(1)}" y1="${CPT}" x2="${gx.toFixed(1)}" y2="${(CPT + CPH).toFixed(1)}" stroke="${BDR}" stroke-width="0.8"/>` }
   yLvls.forEach(lv => { s += `<line x1="${CPL}" y1="${lv.gy.toFixed(1)}" x2="${(W - CPR).toFixed(1)}" y2="${lv.gy.toFixed(1)}" stroke="${BDR}" stroke-width="0.8"/>` })
   s += `<path d="${cFill}" fill="url(#ofG)"/>`
-  s += `<path d="${cLine}" fill="none" stroke="${BLUE}" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>`
+  s += `<path d="${cLine}" fill="none" stroke="${BLUE}" stroke-width="2.5" stroke-linejoin="miter"/>`
   yLvls.forEach(lv => { s += `<text x="${W - CPR + 10}" y="${(lv.gy + 4).toFixed(1)}" font-family="Arial,sans-serif" font-size="13" fill="${LGR}">$${Math.round(lv.v).toLocaleString('en-US')}</text>` })
   s += '</svg>'
   return s
@@ -2434,13 +2439,13 @@ function makeOFSecChart(cData2, bars) {
     x: C2PL + (bars > 1 ? i / (bars - 1) : 0) * C2PW,
     y: C2PT + (1 - v / y2Top) * C2PH,
   }))
-  const c2Line = svgSmooth(c2Pts)
+  const c2Line = svgLine(c2Pts)
   const c2Fill = c2Line + ` L ${c2Pts[c2Pts.length - 1].x.toFixed(1)} ${(C2PT + C2PH).toFixed(1)} L ${C2PL} ${(C2PT + C2PH).toFixed(1)} Z`
   let s = `<svg width="${W}" height="${C2H}" viewBox="0 0 ${W} ${C2H}" xmlns="http://www.w3.org/2000/svg" style="display:block;flex-shrink:0">`
   s += `<rect width="${W}" height="${C2H}" fill="#ffffff"/>`
   s += `<line x1="0" y1="0" x2="${W}" y2="0" stroke="${BDR}" stroke-width="0.8"/>`
   s += `<path d="${c2Fill}" fill="rgba(0,0,0,0.05)"/>`
-  s += `<path d="${c2Line}" fill="none" stroke="#aaaaaa" stroke-width="2" stroke-linecap="round"/>`
+  s += `<path d="${c2Line}" fill="none" stroke="#aaaaaa" stroke-width="2" stroke-linejoin="miter"/>`
   s += `<text x="${W - C2PR + 10}" y="${C2PT + 4}" font-family="Arial,sans-serif" font-size="13" fill="${LGR}">${Math.round(y2Top)}</text>`
   s += `<text x="${W - C2PR + 10}" y="${(C2PT + C2PH * 0.5 + 4).toFixed(1)}" font-family="Arial,sans-serif" font-size="13" fill="${LGR}">${Math.round(y2Top / 2)}</text>`
   s += '</svg>'
@@ -2763,7 +2768,7 @@ app.post('/dashboard/generate', genericLimiter, async (req, res) => {
         growthPct,
         cData, cData2, bars, dateLabels,
       })
-      vpW = 768; vpH = 1188
+      vpW = 768; vpH = 1196
     } else if (tpl === 'Fanfix') {
       // ── Fanfix: Content Protection layout matching Fanfix.png ─────────────
       const periodLabel =
