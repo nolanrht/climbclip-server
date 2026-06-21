@@ -2448,7 +2448,7 @@ async function renderHtml(html, vpWidth, vpHeight) {
 function makeOFMainChart(cData, bars, yMax) {
   const W = 768, CH = 160, CPL = 8, CPR = 68, CPT = 14
   const CPW = W - CPL - CPR, CPH = CH - CPT
-  const BLUE = '#00aff0', BDR = '#e5e5e5', LGR = '#9e9e9e'
+  const BLUE = '#00aff0', BDR = '#e5e5e5', LGR = '#333333'
   const maxD = Math.max(...cData, 1)
   const yTop = yMax || roundToNice(maxD * 1.05)
   const yLvls = [
@@ -2477,7 +2477,7 @@ function makeOFMainChart(cData, bars, yMax) {
 function makeOFSecChart(cData2, bars) {
   const W = 768, C2H = 160, C2PL = 8, C2PR = 68, C2PT = 14, C2PB = 6
   const C2PW = W - C2PL - C2PR, C2PH = C2H - C2PT - C2PB
-  const LGR = '#9e9e9e', BDR = '#e5e5e5'
+  const LGR = '#333333', BDR = '#e5e5e5'
   const maxV2 = Math.max(...cData2, 1)
   const y2Top = roundToNice(maxV2 * 1.15)
   const y2Lvls = [
@@ -2855,7 +2855,7 @@ app.post('/dashboard/generate', genericLimiter, async (req, res) => {
         cData, cData2, bars: ofBars, dateLabels,
         yMax: chartYMax,
       })
-      vpW = 768; vpH = 1184
+      vpW = 768; vpH = 1188
     } else if (tpl === 'Fanfix') {
       // ── Fanfix: Content Protection layout matching Fanfix.png ─────────────
       const periodLabel =
