@@ -2449,12 +2449,13 @@ function makeOFMainChart(cData, bars, yMax) {
   const W = 768, CH = 160, CPL = 8, CPR = 68, CPT = 14
   const CPW = W - CPL - CPR, CPH = CH - CPT
   const BLUE = '#00aff0', BDR = '#e5e5e5', LGR = '#333333'
-  const maxD = Math.max(...cData, 1)
-  const yTop = yMax || roundToNice(maxD * 1.05)
-  const yLvls = [
-    { v: yTop,            gy: CPT },
-    { v: Math.round(yTop * 2 / 3), gy: CPT + CPH * (1 / 3) },
-    { v: Math.round(yTop * 1 / 3), gy: CPT + CPH * (2 / 3) },
+  const rawTop = yMax || roundToNice(Math.max(...cData, 1) * 1.05)
+  const step   = roundToNice(rawTop / 3)
+  const yTop   = step * 3
+  const yLvls  = [
+    { v: step * 3, gy: CPT },
+    { v: step * 2, gy: CPT + CPH * (1 / 3) },
+    { v: step * 1, gy: CPT + CPH * (2 / 3) },
   ]
   const cPts = cData.map((v, i) => ({
     x: CPL + (bars > 1 ? i / (bars - 1) : 0) * CPW,
@@ -2478,12 +2479,13 @@ function makeOFSecChart(cData2, bars) {
   const W = 768, C2H = 160, C2PL = 8, C2PR = 68, C2PT = 14, C2PB = 6
   const C2PW = W - C2PL - C2PR, C2PH = C2H - C2PT - C2PB
   const LGR = '#333333', BDR = '#e5e5e5'
-  const maxV2 = Math.max(...cData2, 1)
-  const y2Top = roundToNice(maxV2 * 1.15)
+  const rawV2  = Math.max(...cData2, 1) * 1.15
+  const step2  = roundToNice(rawV2 / 3)
+  const y2Top  = step2 * 3
   const y2Lvls = [
-    { v: y2Top,                     gy: C2PT },
-    { v: Math.round(y2Top * 2 / 3), gy: C2PT + C2PH * (1 / 3) },
-    { v: Math.round(y2Top * 1 / 3), gy: C2PT + C2PH * (2 / 3) },
+    { v: step2 * 3, gy: C2PT },
+    { v: step2 * 2, gy: C2PT + C2PH * (1 / 3) },
+    { v: step2 * 1, gy: C2PT + C2PH * (2 / 3) },
   ]
   const c2Pts = cData2.map((v, i) => ({
     x: C2PL + (bars > 1 ? i / (bars - 1) : 0) * C2PW,
@@ -2493,7 +2495,7 @@ function makeOFSecChart(cData2, bars) {
   const c2Fill = c2Line + ` L ${c2Pts[c2Pts.length - 1].x.toFixed(1)} ${(C2PT + C2PH).toFixed(1)} L ${C2PL} ${(C2PT + C2PH).toFixed(1)} Z`
   let s = `<svg width="${W}" height="${C2H}" viewBox="0 0 ${W} ${C2H}" xmlns="http://www.w3.org/2000/svg" style="display:block;flex-shrink:0">`
   s += `<rect width="${W}" height="${C2H}" fill="#ffffff"/>`
-  s += `<line x1="0" y1="0" x2="${W}" y2="0" stroke="${BDR}" stroke-width="0.8"/>`
+  for (let i = 1; i <= 4; i++) { const gx = C2PL + C2PW * i / 5; s += `<line x1="${gx.toFixed(1)}" y1="${C2PT}" x2="${gx.toFixed(1)}" y2="${(C2PT + C2PH).toFixed(1)}" stroke="${BDR}" stroke-width="0.8"/>` }
   y2Lvls.forEach(lv => { s += `<line x1="${C2PL}" y1="${lv.gy.toFixed(1)}" x2="${(W - C2PR).toFixed(1)}" y2="${lv.gy.toFixed(1)}" stroke="${BDR}" stroke-width="0.8"/>` })
   s += `<path d="${c2Fill}" fill="rgba(0,0,0,0.09)"/>`
   s += `<path d="${c2Line}" fill="none" stroke="#aaaaaa" stroke-width="2" stroke-linejoin="miter"/>`
@@ -2855,7 +2857,7 @@ app.post('/dashboard/generate', genericLimiter, async (req, res) => {
         cData, cData2, bars: ofBars, dateLabels,
         yMax: chartYMax,
       })
-      vpW = 768; vpH = 1188
+      vpW = 768; vpH = 1176
     } else if (tpl === 'Fanfix') {
       // ── Fanfix: Content Protection layout matching Fanfix.png ─────────────
       const periodLabel =
