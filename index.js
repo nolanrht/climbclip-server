@@ -2469,7 +2469,7 @@ function makeOFMainChart(cData, bars, yMax) {
   yLvls.forEach(lv => { s += `<line x1="${CPL}" y1="${lv.gy.toFixed(1)}" x2="${(W - CPR).toFixed(1)}" y2="${lv.gy.toFixed(1)}" stroke="${BDR}" stroke-width="0.8"/>` })
   s += `<path d="${cFill}" fill="url(#ofG)"/>`
   s += `<path d="${cLine}" fill="none" stroke="${BLUE}" stroke-width="2.5" stroke-linejoin="miter"/>`
-  yLvls.forEach(lv => { s += `<text x="${W - CPR + 10}" y="${(lv.gy + 4).toFixed(1)}" font-family="Arial,sans-serif" font-size="13" fill="${LGR}">$${Math.round(lv.v).toLocaleString('en-US')}</text>` })
+  yLvls.forEach(lv => { s += `<text x="${W - CPR + 10}" y="${(lv.gy + 4).toFixed(1)}" font-family="Arial,sans-serif" font-size="13" font-weight="700" fill="${LGR}">$${Math.round(lv.v).toLocaleString('en-US')}</text>` })
   s += '</svg>'
   return s
 }
@@ -2497,7 +2497,7 @@ function makeOFSecChart(cData2, bars) {
   y2Lvls.forEach(lv => { s += `<line x1="${C2PL}" y1="${lv.gy.toFixed(1)}" x2="${(W - C2PR).toFixed(1)}" y2="${lv.gy.toFixed(1)}" stroke="${BDR}" stroke-width="0.8"/>` })
   s += `<path d="${c2Fill}" fill="rgba(0,0,0,0.09)"/>`
   s += `<path d="${c2Line}" fill="none" stroke="#aaaaaa" stroke-width="2" stroke-linejoin="miter"/>`
-  y2Lvls.forEach(lv => { s += `<text x="${W - C2PR + 10}" y="${(lv.gy + 4).toFixed(1)}" font-family="Arial,sans-serif" font-size="13" fill="${LGR}">$${Math.round(lv.v).toLocaleString('en-US')}</text>` })
+  y2Lvls.forEach(lv => { s += `<text x="${W - C2PR + 10}" y="${(lv.gy + 4).toFixed(1)}" font-family="Arial,sans-serif" font-size="13" font-weight="700" fill="${LGR}">$${Math.round(lv.v).toLocaleString('en-US')}</text>` })
   s += '</svg>'
   return s
 }
