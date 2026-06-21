@@ -2446,7 +2446,7 @@ async function renderHtml(html, vpWidth, vpHeight) {
 
 // ─── CHART SVG HELPERS (shared for HTML injection) ──────────────────────────
 function makeOFMainChart(cData, bars, yMax) {
-  const W = 768, CH = 280, CPL = 8, CPR = 68, CPT = 16
+  const W = 768, CH = 160, CPL = 8, CPR = 68, CPT = 14
   const CPW = W - CPL - CPR, CPH = CH - CPT
   const BLUE = '#00aff0', BDR = '#e5e5e5', LGR = '#9e9e9e'
   const maxD = Math.max(...cData, 1)
@@ -2475,11 +2475,16 @@ function makeOFMainChart(cData, bars, yMax) {
 }
 
 function makeOFSecChart(cData2, bars) {
-  const W = 768, C2H = 44, C2PL = 8, C2PR = 68, C2PT = 6, C2PB = 4
+  const W = 768, C2H = 160, C2PL = 8, C2PR = 68, C2PT = 14, C2PB = 6
   const C2PW = W - C2PL - C2PR, C2PH = C2H - C2PT - C2PB
   const LGR = '#9e9e9e', BDR = '#e5e5e5'
   const maxV2 = Math.max(...cData2, 1)
   const y2Top = roundToNice(maxV2 * 1.15)
+  const y2Lvls = [
+    { v: y2Top,                     gy: C2PT },
+    { v: Math.round(y2Top * 2 / 3), gy: C2PT + C2PH * (1 / 3) },
+    { v: Math.round(y2Top * 1 / 3), gy: C2PT + C2PH * (2 / 3) },
+  ]
   const c2Pts = cData2.map((v, i) => ({
     x: C2PL + (bars > 1 ? i / (bars - 1) : 0) * C2PW,
     y: C2PT + (1 - v / y2Top) * C2PH,
@@ -2489,10 +2494,10 @@ function makeOFSecChart(cData2, bars) {
   let s = `<svg width="${W}" height="${C2H}" viewBox="0 0 ${W} ${C2H}" xmlns="http://www.w3.org/2000/svg" style="display:block;flex-shrink:0">`
   s += `<rect width="${W}" height="${C2H}" fill="#ffffff"/>`
   s += `<line x1="0" y1="0" x2="${W}" y2="0" stroke="${BDR}" stroke-width="0.8"/>`
+  y2Lvls.forEach(lv => { s += `<line x1="${C2PL}" y1="${lv.gy.toFixed(1)}" x2="${(W - C2PR).toFixed(1)}" y2="${lv.gy.toFixed(1)}" stroke="${BDR}" stroke-width="0.8"/>` })
   s += `<path d="${c2Fill}" fill="rgba(0,0,0,0.09)"/>`
   s += `<path d="${c2Line}" fill="none" stroke="#aaaaaa" stroke-width="2" stroke-linejoin="miter"/>`
-  s += `<text x="${W - C2PR + 10}" y="${C2PT + 3}" font-family="Arial,sans-serif" font-size="11" fill="${LGR}">${Math.round(y2Top)}</text>`
-  s += `<text x="${W - C2PR + 10}" y="${(C2PT + C2PH * 0.5 + 3).toFixed(1)}" font-family="Arial,sans-serif" font-size="11" fill="${LGR}">${Math.round(y2Top / 2)}</text>`
+  y2Lvls.forEach(lv => { s += `<text x="${W - C2PR + 10}" y="${(lv.gy + 4).toFixed(1)}" font-family="Arial,sans-serif" font-size="13" fill="${LGR}">$${Math.round(lv.v).toLocaleString('en-US')}</text>` })
   s += '</svg>'
   return s
 }
@@ -2850,7 +2855,7 @@ app.post('/dashboard/generate', genericLimiter, async (req, res) => {
         cData, cData2, bars: ofBars, dateLabels,
         yMax: chartYMax,
       })
-      vpW = 768; vpH = 1188
+      vpW = 768; vpH = 1184
     } else if (tpl === 'Fanfix') {
       // ── Fanfix: Content Protection layout matching Fanfix.png ─────────────
       const periodLabel =
