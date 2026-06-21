@@ -2445,12 +2445,12 @@ async function renderHtml(html, vpWidth, vpHeight) {
 }
 
 // ─── CHART SVG HELPERS (shared for HTML injection) ──────────────────────────
-function makeOFMainChart(cData, bars) {
+function makeOFMainChart(cData, bars, yMax) {
   const W = 768, CH = 280, CPL = 8, CPR = 68, CPT = 16
   const CPW = W - CPL - CPR, CPH = CH - CPT
   const BLUE = '#00aff0', BDR = '#e5e5e5', LGR = '#9e9e9e'
   const maxD = Math.max(...cData, 1)
-  const yTop = roundToNice(maxD * 1.05)
+  const yTop = yMax || roundToNice(maxD * 1.05)
   const yLvls = [
     { v: yTop,            gy: CPT },
     { v: Math.round(yTop * 2 / 3), gy: CPT + CPH * (1 / 3) },
@@ -2475,7 +2475,7 @@ function makeOFMainChart(cData, bars) {
 }
 
 function makeOFSecChart(cData2, bars) {
-  const W = 768, C2H = 50, C2PL = 8, C2PR = 68, C2PT = 8, C2PB = 4
+  const W = 768, C2H = 44, C2PL = 8, C2PR = 68, C2PT = 6, C2PB = 4
   const C2PW = W - C2PL - C2PR, C2PH = C2H - C2PT - C2PB
   const LGR = '#9e9e9e', BDR = '#e5e5e5'
   const maxV2 = Math.max(...cData2, 1)
@@ -2489,7 +2489,7 @@ function makeOFSecChart(cData2, bars) {
   let s = `<svg width="${W}" height="${C2H}" viewBox="0 0 ${W} ${C2H}" xmlns="http://www.w3.org/2000/svg" style="display:block;flex-shrink:0">`
   s += `<rect width="${W}" height="${C2H}" fill="#ffffff"/>`
   s += `<line x1="0" y1="0" x2="${W}" y2="0" stroke="${BDR}" stroke-width="0.8"/>`
-  s += `<path d="${c2Fill}" fill="rgba(0,0,0,0.05)"/>`
+  s += `<path d="${c2Fill}" fill="rgba(0,0,0,0.09)"/>`
   s += `<path d="${c2Line}" fill="none" stroke="#aaaaaa" stroke-width="2" stroke-linejoin="miter"/>`
   s += `<text x="${W - C2PR + 10}" y="${C2PT + 3}" font-family="Arial,sans-serif" font-size="11" fill="${LGR}">${Math.round(y2Top)}</text>`
   s += `<text x="${W - C2PR + 10}" y="${(C2PT + C2PH * 0.5 + 3).toFixed(1)}" font-family="Arial,sans-serif" font-size="11" fill="${LGR}">${Math.round(y2Top / 2)}</text>`
@@ -2659,8 +2659,8 @@ function loadTemplate(name) {
 }
 
 function buildOFHtml(d) {
-  const { curBal, pendBal, periodLabel, dateRange, netAmt, grossAmt, growthPct, cData, cData2, bars, dateLabels } = d
-  const mainSvg = makeOFMainChart(cData, bars)
+  const { curBal, pendBal, periodLabel, dateRange, netAmt, grossAmt, growthPct, cData, cData2, bars, dateLabels, yMax } = d
+  const mainSvg = makeOFMainChart(cData, bars, yMax)
   const secSvg  = makeOFSecChart(cData2, bars)
   const dateHtml = dateLabels.map((l, i) => {
     const parts = l.split('\n')
@@ -2780,28 +2780,64 @@ app.post('/dashboard/generate', genericLimiter, async (req, res) => {
         period === 'custom'            ? 'Custom period'  : 'Last 30 days'
       const dateRangeEN = `${fmtEN(pStart)} - ${fmtEN(pEnd)} (local time UTC +02:00)`
 
-      let fmtXLbl
+      // Adaptive bars and labels by period
+      const FR_DAYS = ['Dim', 'Lun', 'Mar', 'Mer', 'Jeu', 'Ven', 'Sam']
+      let ofBars, dateLabels
+
       if (period === '24h') {
-        fmtXLbl = dt => `${dt.getHours()}:00\n${dt.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}`
+        ofBars = 12
+        dateLabels = Array.from({ length: 5 }, (_, i) => {
+          const t  = i / 4
+          const dt = new Date(pStart.getTime() + t * (pEnd.getTime() - pStart.getTime()))
+          return String(dt.getHours()).padStart(2, '0') + 'h'
+        })
       } else if (period === '7d' || period === '1w') {
-        fmtXLbl = dt => dt.toLocaleDateString('en-US', { weekday: 'short' }) +
-                        '\n' + dt.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })
+        ofBars = 7
+        dateLabels = Array.from({ length: 7 }, (_, i) => {
+          const dt = new Date(pStart.getTime() + i * 86400000)
+          return FR_DAYS[dt.getDay()]
+        })
+      } else if (period === 'custom' && startDate && endDate) {
+        const days = Math.max(1, Math.ceil((pEnd - pStart) / 86400000))
+        if (days <= 3) {
+          ofBars = days * 4
+          dateLabels = Array.from({ length: 5 }, (_, i) => {
+            const t  = i / 4
+            const dt = new Date(pStart.getTime() + t * (pEnd.getTime() - pStart.getTime()))
+            return String(dt.getHours()).padStart(2, '0') + 'h'
+          })
+        } else if (days <= 14) {
+          ofBars = days
+          const numLbls = Math.min(days, 7)
+          dateLabels = Array.from({ length: numLbls }, (_, i) => {
+            const t  = numLbls > 1 ? i / (numLbls - 1) : 0
+            const dt = new Date(pStart.getTime() + t * (pEnd.getTime() - pStart.getTime()))
+            return FR_DAYS[dt.getDay()]
+          })
+        } else {
+          ofBars = Math.min(days, 30)
+          dateLabels = Array.from({ length: 5 }, (_, i) => {
+            const t  = i / 4
+            const dt = new Date(pStart.getTime() + t * (pEnd.getTime() - pStart.getTime()))
+            const md = dt.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })
+            return `${md},\n${dt.getFullYear()}`
+          })
+        }
       } else {
-        fmtXLbl = dt => {
+        // 30d default: 30 daily points, 5 weekly labels
+        ofBars = 30
+        dateLabels = Array.from({ length: 5 }, (_, i) => {
+          const t  = i / 4
+          const dt = new Date(pStart.getTime() + t * (pEnd.getTime() - pStart.getTime()))
           const md = dt.toLocaleDateString('en-US', { month: 'short', day: 'numeric' })
           return `${md},\n${dt.getFullYear()}`
-        }
+        })
       }
-      const dateLabels = Array.from({ length: 5 }, (_, i) => {
-        const t  = i / 4
-        const dt = new Date(pStart.getTime() + t * (pEnd.getTime() - pStart.getTime()))
-        return fmtXLbl(dt)
-      })
 
-      // Daily net values: organic shape (stable ±8%, 2-3 natural peaks)
-      const cData  = dashOrganic(net, bars, Math.round(displayGross))
-      // Secondary chart: engagement-scale counts, organic shape
-      const cData2 = dashOrganic(displayGross * 0.02, bars, Math.round(displayGross) + 1)
+      // Y-axis ceiling coherent with total: daily peak = net/bars * 1.3
+      const chartYMax = roundToNice(net / Math.max(ofBars, 1) * 1.3)
+      const cData  = dashOrganic(net, ofBars, Math.round(displayGross))
+      const cData2 = dashOrganic(displayGross * 0.02, ofBars, Math.round(displayGross) + 1)
 
       htmlStr = buildOFHtml({
         curBal:     fmtUSD(curBal),
@@ -2811,9 +2847,10 @@ app.post('/dashboard/generate', genericLimiter, async (req, res) => {
         netAmt:     fmtUSD(net),
         grossAmt:   fmtUSD(displayGross),
         growthPct,
-        cData, cData2, bars, dateLabels,
+        cData, cData2, bars: ofBars, dateLabels,
+        yMax: chartYMax,
       })
-      vpW = 768; vpH = 1190
+      vpW = 768; vpH = 1188
     } else if (tpl === 'Fanfix') {
       // ── Fanfix: Content Protection layout matching Fanfix.png ─────────────
       const periodLabel =
