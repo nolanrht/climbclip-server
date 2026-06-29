@@ -1563,54 +1563,48 @@ app.post('/retouch/remove-text', uploadLimiter, uploadMem.single('image'), async
       .resize(procW, procH).removeAlpha().raw().toBuffer({ resolveWithObject: true })
     const { data: gray } = await sharp(imageBuffer)
       .resize(procW, procH).greyscale().raw().toBuffer({ resolveWithObject: true })
-    // σ=2 blur for edge enhancement: |pixel − blur| = local edge strength
-    const { data: microBlur } = await sharp(imageBuffer)
-      .resize(procW, procH).greyscale().blur(2).raw().toBuffer({ resolveWithObject: true })
 
-    // Detect text pixels: Sobel gradient + brightness threshold + blur-difference
-    const edgeMap = new Uint8Array(procW * procH)
-    for (let y = 1; y < procH - 1; y++) {
-      for (let x = 1; x < procW - 1; x++) {
-        const i = y * procW + x
-        const v = gray[i]
-        // Sobel X
-        const gx = -gray[(y-1)*procW+(x-1)] - 2*gray[y*procW+(x-1)] - gray[(y+1)*procW+(x-1)]
-                   +gray[(y-1)*procW+(x+1)] + 2*gray[y*procW+(x+1)] + gray[(y+1)*procW+(x+1)]
-        // Sobel Y
-        const gy = -gray[(y-1)*procW+(x-1)] - 2*gray[(y-1)*procW+x] - gray[(y-1)*procW+(x+1)]
-                   +gray[(y+1)*procW+(x-1)] + 2*gray[(y+1)*procW+x] + gray[(y+1)*procW+(x+1)]
-        const grad = Math.sqrt(gx * gx + gy * gy)
-        const edgeStrength = Math.abs(v - microBlur[i])
-        // Strong edge + dark or bright value = text outline
-        if ((grad > 60 || edgeStrength > 20) && (v < 80 || v > 175)) edgeMap[i] = 1
-      }
-    }
-
-    // Include very dark fill pixels (interior of dark text strokes)
+    // Seuillage adaptatif : texte sombre (< 80) ou texte clair sur fond sombre (> 200)
+    const rawMask = new Uint8Array(procW * procH)
     for (let i = 0; i < procW * procH; i++) {
-      if (gray[i] < 40) edgeMap[i] = 1
+      if (gray[i] < 80 || gray[i] > 200) rawMask[i] = 1
     }
 
-    // Dilate 4px to cover full stroke width + anti-aliasing
-    let finalMask = dilateMask(edgeMap, procW, procH, 4)
-
-    // Safety: if > 40% masked, tighten thresholds to avoid destroying the image
-    const maskedCount = finalMask.reduce((s, v) => s + v, 0)
-    if (maskedCount > procW * procH * 0.4) {
-      const strict = new Uint8Array(procW * procH)
-      for (let y = 1; y < procH - 1; y++) {
-        for (let x = 1; x < procW - 1; x++) {
-          const i = y * procW + x
-          const v = gray[i]
-          const gx = -gray[(y-1)*procW+(x-1)] - 2*gray[y*procW+(x-1)] - gray[(y+1)*procW+(x-1)]
-                     +gray[(y-1)*procW+(x+1)] + 2*gray[y*procW+(x+1)] + gray[(y+1)*procW+(x+1)]
-          const gy = -gray[(y-1)*procW+(x-1)] - 2*gray[(y-1)*procW+x] - gray[(y-1)*procW+(x+1)]
-                     +gray[(y+1)*procW+(x-1)] + 2*gray[(y+1)*procW+x] + gray[(y+1)*procW+(x+1)]
-          if (Math.sqrt(gx*gx + gy*gy) > 100 && (v < 50 || v > 200)) strict[i] = 1
+    // Clustering BFS : ignore bruit (< 50px), garde texte (50–5000px)
+    const labels = new Int32Array(procW * procH).fill(-1)
+    const clusterSizes = []
+    let labelCount = 0
+    for (let i = 0; i < procW * procH; i++) {
+      if (!rawMask[i] || labels[i] !== -1) continue
+      const q = [i]; let qHead = 0
+      labels[i] = labelCount
+      while (qHead < q.length) {
+        const cur = q[qHead++]
+        const cx = cur % procW, cy = (cur / procW) | 0
+        const dirs = [[cx-1,cy],[cx+1,cy],[cx,cy-1],[cx,cy+1]]
+        for (const [nx, ny] of dirs) {
+          if (nx < 0 || ny < 0 || nx >= procW || ny >= procH) continue
+          const ni = ny * procW + nx
+          if (!rawMask[ni] || labels[ni] !== -1) continue
+          labels[ni] = labelCount; q.push(ni)
         }
       }
-      finalMask = dilateMask(strict, procW, procH, 3)
+      clusterSizes.push(q.length)
+      labelCount++
     }
+
+    const textMask = new Uint8Array(procW * procH)
+    for (let i = 0; i < procW * procH; i++) {
+      if (labels[i] === -1) continue
+      const sz = clusterSizes[labels[i]]
+      if (sz >= 50 && sz <= 5000) textMask[i] = 255
+    }
+
+    const detectedCount = textMask.reduce((s, v) => s + (v > 0 ? 1 : 0), 0)
+    console.log(`[remove-text] ${detectedCount} pixels détectés (${labelCount} clusters, ${clusterSizes.filter(s => s >= 50 && s <= 5000).length} retenus)`)
+
+    // Dilate 3px autour du masque texte
+    let finalMask = dilateMask(textMask, procW, procH, 3)
 
     const result = applyDiffusion(imgData, finalMask, procW, procH, 6)
     const out = await sharp(result, { raw: { width: procW, height: procH, channels: 3 } })
