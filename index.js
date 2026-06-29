@@ -144,6 +144,7 @@ app.get("/auth/google", (req, res) => {
     access_type: "offline",
     scope: ["https://www.googleapis.com/auth/drive.file"],
     prompt: "consent",
+    redirect_uri: GOOGLE_REDIRECT_URI,
     state: JSON.stringify({ email, redirect: redirectUri }),
   })
   res.redirect(url)
