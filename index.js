@@ -1264,62 +1264,67 @@ function patchMatchFill(px, origMask, w, h) {
   }
 }
 
-// ── Poisson blending : propagation concentrique du gradient de luminosite ──────
-// Resout l'equation de Laplace sur la luminosite (Gauss-Seidel en ordre BFS).
-// La luminosite harmonique interpole lissement depuis le bord du masque vers le centre.
-// On applique uniquement le delta de luminosite pour preserver la texture PatchMatch.
-function poissonBlend(px, origMask, w, h) {
-  const N = w * h
-
-  // Distance BFS depuis les pixels originaux (non-masques)
-  const dist = new Uint16Array(N).fill(65535)
-  const bfsQ = []
-  for (let i = 0; i < N; i++) if (!origMask[i]) { dist[i] = 0; bfsQ.push(i) }
-  for (let qi = 0; qi < bfsQ.length; qi++) {
-    const i = bfsQ[qi], x = i%w, y = (i/w)|0, d = dist[i]+1
-    if (x > 0   && dist[i-1] > d) { dist[i-1] = d; bfsQ.push(i-1) }
-    if (x < w-1 && dist[i+1] > d) { dist[i+1] = d; bfsQ.push(i+1) }
-    if (y > 0   && dist[i-w] > d) { dist[i-w] = d; bfsQ.push(i-w) }
-    if (y < h-1 && dist[i+w] > d) { dist[i+w] = d; bfsQ.push(i+w) }
-  }
-
-  // Pixels remplis dans l'ordre BFS (du bord vers le centre)
-  const filled = []
-  for (const i of bfsQ) { if (origMask[i]) filled.push(i) }
-
-  // Luminosites initiales (bord = valeurs originales fixes, centre = valeurs inpaintees)
-  const harmLum = new Float32Array(N)
-  for (let i = 0; i < N; i++) {
-    harmLum[i] = 0.299*px[i*4] + 0.587*px[i*4+1] + 0.114*px[i*4+2]
-  }
-
-  // 30 iterations Gauss-Seidel en ordre BFS : converge rapidement car
-  // chaque iteration propage l'information depuis le bord (deja mis a jour)
-  for (let iter = 0; iter < 30; iter++) {
-    for (const idx of filled) {
-      const x = idx%w, y = (idx/w)|0
-      let sum = 0, cnt = 0
-      if (x > 0)   { sum += harmLum[idx-1]; cnt++ }
-      if (x < w-1) { sum += harmLum[idx+1]; cnt++ }
-      if (y > 0)   { sum += harmLum[idx-w]; cnt++ }
-      if (y < h-1) { sum += harmLum[idx+w]; cnt++ }
-      if (cnt) harmLum[idx] = sum / cnt
+// ── Luminosité locale : chaque pixel rempli adopte la lum moyenne de ses voisins non-masqués sur R px ──
+function localLumMatch(px, origMask, w, h, R) {
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      const i = y*w+x
+      if (!origMask[i]) continue
+      let lsum = 0, cnt = 0
+      for (let dy = -R; dy <= R; dy++) {
+        for (let dx = -R; dx <= R; dx++) {
+          const nx = x+dx, ny = y+dy
+          if (nx < 0 || ny < 0 || nx >= w || ny >= h) continue
+          const ni = ny*w+nx
+          if (origMask[ni]) continue
+          const n4 = ni*4
+          lsum += 0.299*px[n4] + 0.587*px[n4+1] + 0.114*px[n4+2]
+          cnt++
+        }
+      }
+      if (!cnt) continue
+      const targetLum = lsum / cnt
+      const i4 = i*4
+      const curLum = 0.299*px[i4] + 0.587*px[i4+1] + 0.114*px[i4+2]
+      const delta = targetLum - curLum
+      if (Math.abs(delta) < 0.5) continue
+      px[i4]   = Math.max(0, Math.min(255, Math.round(px[i4]   + delta)))
+      px[i4+1] = Math.max(0, Math.min(255, Math.round(px[i4+1] + delta)))
+      px[i4+2] = Math.max(0, Math.min(255, Math.round(px[i4+2] + delta)))
     }
-  }
-
-  // Applique uniquement la correction de luminosite (preserve la texture/couleur inpaintee)
-  for (const idx of filled) {
-    const lum_inp = 0.299*px[idx*4] + 0.587*px[idx*4+1] + 0.114*px[idx*4+2]
-    const delta   = harmLum[idx] - lum_inp
-    if (Math.abs(delta) < 0.5) continue
-    const i4 = idx*4
-    px[i4]   = Math.max(0, Math.min(255, Math.round(px[i4]   + delta)))
-    px[i4+1] = Math.max(0, Math.min(255, Math.round(px[i4+1] + delta)))
-    px[i4+2] = Math.max(0, Math.min(255, Math.round(px[i4+2] + delta)))
   }
 }
 
-// ── Feathering 10px avec blend lineaire ─────────────────────────────────────
+// ── Micro-blur 1px uniquement sur les pixels de bord du masque ──────────────
+function edgeMicroBlur(px, origMask, w, h) {
+  const snap = Buffer.from(px)
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      const i = y*w+x
+      if (!origMask[i]) continue
+      const isBorder = (x > 0 && !origMask[i-1]) || (x < w-1 && !origMask[i+1]) ||
+                       (y > 0 && !origMask[i-w]) || (y < h-1 && !origMask[i+w])
+      if (!isBorder) continue
+      let r = 0, g = 0, b = 0, cnt = 0
+      for (let dy = -1; dy <= 1; dy++) {
+        for (let dx = -1; dx <= 1; dx++) {
+          if (!dx && !dy) continue
+          const nx = x+dx, ny = y+dy
+          if (nx < 0 || ny < 0 || nx >= w || ny >= h) continue
+          const n4 = (ny*w+nx)*4
+          r += snap[n4]; g += snap[n4+1]; b += snap[n4+2]; cnt++
+        }
+      }
+      if (!cnt) continue
+      const i4 = i*4
+      px[i4]   = Math.round((px[i4]   + r/cnt) / 2)
+      px[i4+1] = Math.round((px[i4+1] + g/cnt) / 2)
+      px[i4+2] = Math.round((px[i4+2] + b/cnt) / 2)
+    }
+  }
+}
+
+// ── Feathering 8px avec blend lineaire ──────────────────────────────────────
 function featherBlend(px, origMask, w, h, R) {
   const dist = new Uint16Array(w*h).fill(65535)
   const q = []
@@ -1356,45 +1361,6 @@ function featherBlend(px, origMask, w, h, R) {
   }
 }
 
-function colorCoherence(px, origMask, w, h, R) {
-  for (let y = 0; y < h; y++) {
-    for (let x = 0; x < w; x++) {
-      const i = y*w+x; if (!origMask[i]) continue
-      let r = 0, g = 0, b = 0, wt = 0
-      for (let dy = -R; dy <= R; dy++) {
-        for (let dx = -R; dx <= R; dx++) {
-          const nx = x+dx, ny = y+dy
-          if (nx < 0 || ny < 0 || nx >= w || ny >= h) continue
-          const ni = ny*w+nx; if (origMask[ni]) continue
-          r += px[ni*4]; g += px[ni*4+1]; b += px[ni*4+2]; wt++
-        }
-      }
-      if (!wt) continue
-      const i4 = i*4
-      px[i4]   = Math.round(px[i4]   * 0.7 + (r/wt) * 0.3)
-      px[i4+1] = Math.round(px[i4+1] * 0.7 + (g/wt) * 0.3)
-      px[i4+2] = Math.round(px[i4+2] * 0.7 + (b/wt) * 0.3)
-    }
-  }
-}
-
-function matchLuminance(px, origMask, w, h) {
-  let sl = 0, fl = 0, scnt = 0, fcnt = 0
-  for (let i = 0; i < w*h; i++) {
-    const l = 0.299*px[i*4] + 0.587*px[i*4+1] + 0.114*px[i*4+2]
-    if (origMask[i]) { fl += l; fcnt++ } else { sl += l; scnt++ }
-  }
-  if (!fcnt || !scnt) return
-  const delta = (sl/scnt) - (fl/fcnt)
-  if (Math.abs(delta) < 2) return
-  for (let i = 0; i < w*h; i++) {
-    if (!origMask[i]) continue
-    const i4 = i*4
-    px[i4]   = Math.max(0, Math.min(255, px[i4]   + delta))
-    px[i4+1] = Math.max(0, Math.min(255, px[i4+1] + delta))
-    px[i4+2] = Math.max(0, Math.min(255, px[i4+2] + delta))
-  }
-}
 
 app.post("/retouch/inpaint", uploadLimiter, async (req, res) => {
   try {
@@ -1458,15 +1424,14 @@ app.post("/retouch/inpaint", uploadLimiter, async (req, res) => {
       patchMatchFill(px, origMask, W, H)
     }
 
-    // Poisson blending : force la continuite couleur/luminosite au bord du masque
-    poissonBlend(px, origMask, W, H)
-
-    // Feathering lineaire 30px
-    featherBlend(px, origMask, W, H, 30)
-
-    // Coherence couleur et ajustement luminosite globale
-    colorCoherence(px, origMask, W, H, 5)
-    matchLuminance(px, origMask, W, H)
+    // Ajuste la luminosité de chaque pixel rempli pour matcher ses voisins non-masqués sur 5px
+    localLumMatch(px, origMask, W, H, 5)
+    // Blend progressif sur 8px aux bords du masque uniquement
+    featherBlend(px, origMask, W, H, 8)
+    // Corrige la dérive de luminosité introduite par le feathering
+    localLumMatch(px, origMask, W, H, 5)
+    // Micro-blur 1px sur les pixels de bord pour adoucir la transition
+    edgeMicroBlur(px, origMask, W, H)
 
     // PNG lossless qualite maximale
     img.quality(100)
