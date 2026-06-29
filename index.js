@@ -1445,6 +1445,39 @@ app.post("/retouch/inpaint", uploadLimiter, async (req, res) => {
 
 
 
+// ── Diffusion de pixels ──────────────────────────────────────────────────────
+function applyDiffusion(pixels, mask, width, height, radius, passes) {
+  const result = Buffer.from(pixels)
+  for (let pass = 0; pass < passes; pass++) {
+    for (let y = 0; y < height; y++) {
+      for (let x = 0; x < width; x++) {
+        const idx = (y * width + x) * 4
+        if (mask[y * width + x] > 128) {
+          let r = 0, g = 0, b = 0, count = 0
+          for (let dy = -radius; dy <= radius; dy++) {
+            for (let dx = -radius; dx <= radius; dx++) {
+              const nx = x + dx, ny = y + dy
+              if (nx < 0 || ny < 0 || nx >= width || ny >= height) continue
+              if (mask[ny * width + nx] > 128) continue
+              const nidx = (ny * width + nx) * 4
+              const dist = Math.sqrt(dx*dx + dy*dy)
+              const w = Math.exp(-dist*dist / (2 * 100))
+              r += pixels[nidx]*w; g += pixels[nidx+1]*w; b += pixels[nidx+2]*w; count += w
+            }
+          }
+          if (count > 0) {
+            result[idx]   = Math.round(r / count)
+            result[idx+1] = Math.round(g / count)
+            result[idx+2] = Math.round(b / count)
+            result[idx+3] = 255
+          }
+        }
+      }
+    }
+  }
+  return result
+}
+
 // ── Dilatation de masque ─────────────────────────────────────────────────────
 function dilateMask(mask, width, height, radius) {
   const dilated = Buffer.from(mask)
