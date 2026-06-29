@@ -92,11 +92,16 @@ const supabase = SUPABASE_URL && process.env.SUPABASE_SERVICE_KEY
   ? createClient(SUPABASE_URL, process.env.SUPABASE_SERVICE_KEY, { realtime: { transport: ws } })
   : null
 
-const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID
-const GOOGLE_CLIENT_SECRET = process.env.GOOGLE_CLIENT_SECRET
 const sharp = require("sharp")
-const GOOGLE_REDIRECT_URI = "https://climbclip-server.onrender.com/auth/google/callback"
+const { google } = require("googleapis")
 const FRONTEND_URL = process.env.FRONTEND_URL || "https://climbclip.vercel.app"
+const GOOGLE_REDIRECT_URI = "https://climbclip-server.onrender.com/auth/google/callback"
+
+const oauth2Client = new google.auth.OAuth2(
+  process.env.GOOGLE_CLIENT_ID,
+  process.env.GOOGLE_CLIENT_SECRET,
+  GOOGLE_REDIRECT_URI
+)
 
 const upload = multer({ dest: "/tmp/uploads/", limits: { fileSize: 2 * 1024 * 1024 * 1024 } })
 const uploadMem = multer({ storage: multer.memoryStorage(), limits: { fileSize: 50 * 1024 * 1024 } })
@@ -119,11 +124,14 @@ function updateJob(jobId, update) {
 app.get("/health", (req, res) => res.json({ status: "ok" }))
 
 app.get("/auth/google/config-check", (req, res) => {
+  const id = process.env.GOOGLE_CLIENT_ID || ""
+  const secret = process.env.GOOGLE_CLIENT_SECRET || ""
   res.json({
-    client_id_first20: (GOOGLE_CLIENT_ID || "").slice(0, 20),
-    client_id_last5:   (GOOGLE_CLIENT_ID || "").slice(-5),
-    secret_length:     (GOOGLE_CLIENT_SECRET || "").length,
+    client_id_first20: id.slice(0, 20),
+    client_id_last5:   id.slice(-5),
+    secret_length:     secret.length,
     redirect_uri:      GOOGLE_REDIRECT_URI,
+    supabase_ready:    !!supabase,
   })
 })
 
@@ -132,16 +140,13 @@ app.get("/auth/google/config-check", (req, res) => {
 app.get("/auth/google", (req, res) => {
   const { email, redirect } = req.query
   const redirectUri = redirect || FRONTEND_URL
-  const params = new URLSearchParams({
-    client_id: GOOGLE_CLIENT_ID,
-    redirect_uri: GOOGLE_REDIRECT_URI,
-    response_type: "code",
-    scope: "https://www.googleapis.com/auth/drive.file",
+  const url = oauth2Client.generateAuthUrl({
     access_type: "offline",
+    scope: ["https://www.googleapis.com/auth/drive.file"],
     prompt: "consent",
     state: JSON.stringify({ email, redirect: redirectUri }),
   })
-  res.redirect(`https://accounts.google.com/o/oauth2/v2/auth?${params}`)
+  res.redirect(url)
 })
 
 app.get("/auth/google/callback", async (req, res) => {
@@ -155,7 +160,7 @@ app.get("/auth/google/callback", async (req, res) => {
     return res.redirect(`${frontendUrl}#drive_error`)
   }
   if (!supabase) {
-    console.error("OAuth callback: Supabase not initialized — check SUPABASE_URL and SUPABASE_SERVICE_KEY env vars on Render")
+    console.error("OAuth callback: Supabase not initialized — check SUPABASE_URL and SUPABASE_SERVICE_KEY")
     return res.redirect(`${frontendUrl}#drive_error`)
   }
   if (!email) {
@@ -164,16 +169,12 @@ app.get("/auth/google/callback", async (req, res) => {
   }
 
   try {
-    const tokenRes = await axios.post("https://oauth2.googleapis.com/token", {
-      code, client_id: GOOGLE_CLIENT_ID, client_secret: GOOGLE_CLIENT_SECRET,
-      redirect_uri: GOOGLE_REDIRECT_URI, grant_type: "authorization_code",
-    })
-    const { refresh_token, access_token } = tokenRes.data
-    console.log(`OAuth callback: email=${email} has_refresh_token=${!!refresh_token} has_access_token=${!!access_token}`)
+    const { tokens } = await oauth2Client.getToken(code)
+    console.log(`OAuth callback: email=${email} has_refresh_token=${!!tokens.refresh_token} has_access_token=${!!tokens.access_token}`)
 
-    if (refresh_token) {
+    if (tokens.refresh_token) {
       const { error } = await supabase.from("google_tokens").upsert(
-        { user_email: email, refresh_token, updated_at: new Date().toISOString() },
+        { user_email: email, refresh_token: tokens.refresh_token, updated_at: new Date().toISOString() },
         { onConflict: "user_email" }
       )
       if (error) {
@@ -182,12 +183,10 @@ app.get("/auth/google/callback", async (req, res) => {
       }
       console.log(`Token saved for ${email}`)
     } else {
-      // Google doesn't re-issue refresh_token when one already exists and is still valid.
-      // Check if we already have a valid token for this user.
       const { data: existing, error: selectErr } = await supabase
         .from("google_tokens").select("refresh_token").eq("user_email", email).single()
       if (selectErr || !existing?.refresh_token) {
-        console.error(`No refresh_token from Google and no existing token for ${email}. Google response:`, tokenRes.data)
+        console.error(`No refresh_token from Google and no existing token for ${email}`)
         return res.redirect(`${frontendUrl}#drive_error`)
       }
       console.log(`No new refresh_token from Google but existing token valid for ${email}`)
@@ -195,7 +194,7 @@ app.get("/auth/google/callback", async (req, res) => {
 
     res.redirect(`${frontendUrl}#drive_connected`)
   } catch (err) {
-    console.error("OAuth callback error:", err.response?.data || err.message)
+    console.error("OAuth callback error:", err.message, JSON.stringify(err.response?.data))
     res.redirect(`${frontendUrl}#drive_error`)
   }
 })
@@ -221,11 +220,9 @@ app.post("/drive/upload", async (req, res) => {
   try {
     const { data: tokenData } = await supabase.from("google_tokens").select("refresh_token").eq("user_email", email).single()
     if (!tokenData?.refresh_token) return res.status(401).json({ error: "not_connected" })
-    const tokenRes = await axios.post("https://oauth2.googleapis.com/token", {
-      refresh_token: tokenData.refresh_token, client_id: GOOGLE_CLIENT_ID,
-      client_secret: GOOGLE_CLIENT_SECRET, grant_type: "refresh_token",
-    })
-    const accessToken = tokenRes.data.access_token
+    oauth2Client.setCredentials({ refresh_token: tokenData.refresh_token })
+    const { credentials } = await oauth2Client.refreshAccessToken()
+    const accessToken = credentials.access_token
     const videoRes = await axios({ url: storageUrl, method: "GET", responseType: "stream" })
     const metadata = JSON.stringify({ name: fileName || "clip.mp4", mimeType: "video/mp4" })
     const boundary = "-------climbclip_boundary"
