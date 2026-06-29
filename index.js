@@ -147,6 +147,7 @@ app.get("/auth/google", (req, res) => {
     redirect_uri: GOOGLE_REDIRECT_URI,
     state: JSON.stringify({ email, redirect: redirectUri }),
   })
+  console.log("OAuth URL:", url)
   res.redirect(url)
 })
 
