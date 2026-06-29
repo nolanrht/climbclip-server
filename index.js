@@ -95,7 +95,7 @@ const supabase = SUPABASE_URL && process.env.SUPABASE_SERVICE_KEY
 const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID
 const GOOGLE_CLIENT_SECRET = process.env.GOOGLE_CLIENT_SECRET
 const sharp = require("sharp")
-const GOOGLE_REDIRECT_URI = process.env.GOOGLE_REDIRECT_URI || "https://climbclip-server-production.up.railway.app/auth/google/callback"
+const GOOGLE_REDIRECT_URI = process.env.GOOGLE_REDIRECT_URI || "https://climbclip-server.onrender.com/auth/google/callback"
 const FRONTEND_URL = process.env.FRONTEND_URL || "https://climbclip.vercel.app"
 
 const upload = multer({ dest: "/tmp/uploads/", limits: { fileSize: 2 * 1024 * 1024 * 1024 } })
