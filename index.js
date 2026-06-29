@@ -1548,99 +1548,52 @@ app.post('/retouch/remove-watermark', uploadLimiter, uploadMem.single('image'), 
   }
 })
 
-// ── Retrait texte ────────────────────────────────────────────────────────────
-
-app.post('/retouch/remove-text', uploadLimiter, uploadMem.single('image'), async (req, res) => {
-  if (!req.file) return res.status(400).json({ error: 'Image manquante' })
+// ── Retrait texte — même pipeline que /retouch/inpaint (masque manuel) ───────
+// Le frontend envoie {image, mask} identiques à /retouch/inpaint
+app.post('/retouch/remove-text', express.json({ limit: '50mb' }), async (req, res) => {
   try {
-    const imageBuffer = req.file.buffer
-    const meta = await sharp(imageBuffer).metadata()
-    const maxDim = 1500
-    const scale = Math.min(1, maxDim / Math.max(meta.width, meta.height))
-    const procW = Math.round(meta.width * scale), procH = Math.round(meta.height * scale)
-
-    const { data: imgData } = await sharp(imageBuffer)
-      .resize(procW, procH).removeAlpha().raw().toBuffer({ resolveWithObject: true })
-    const { data: gray } = await sharp(imageBuffer)
-      .resize(procW, procH).greyscale().raw().toBuffer({ resolveWithObject: true })
-
-    const rawMask = new Uint8Array(procW * procH)
-
-    // Cas 1 : texte sombre sur fond clair
-    // Cas 2 : texte clair sur fond sombre
-    for (let i = 0; i < procW * procH; i++) {
-      if (gray[i] < 80 || gray[i] > 180) rawMask[i] = 1
-    }
-
-    // Cas 3 : texte coloré — fort contraste RGB avec les voisins sur 2px
-    for (let y = 2; y < procH - 2; y++) {
-      for (let x = 2; x < procW - 2; x++) {
-        const i = y * procW + x
-        const i3 = i * 3
-        let maxDiff = 0
-        for (let dy = -2; dy <= 2; dy++) {
-          for (let dx = -2; dx <= 2; dx++) {
-            if (!dx && !dy) continue
-            const ni = (y+dy) * procW + (x+dx), ni3 = ni * 3
-            maxDiff = Math.max(maxDiff,
-              Math.abs(imgData[i3]   - imgData[ni3]),
-              Math.abs(imgData[i3+1] - imgData[ni3+1]),
-              Math.abs(imgData[i3+2] - imgData[ni3+2])
-            )
-          }
-        }
-        if (maxDiff > 40) rawMask[i] = 1
+    const { image, mask } = req.body
+    if (!image || !mask) return res.status(400).json({ error: "image ou masque manquant" })
+    const imgBuf = Buffer.from(image.replace(/^data:image\/\w+;base64,/, ""), "base64")
+    const mskBuf = Buffer.from(mask.replace(/^data:image\/\w+;base64,/, ""), "base64")
+    const img = await Jimp.read(imgBuf)
+    const msk = await Jimp.read(mskBuf)
+    const W = img.getWidth(), H = img.getHeight()
+    if (msk.getWidth() !== W || msk.getHeight() !== H) msk.resize(W, H, Jimp.RESIZE_NEAREST_NEIGHBOR)
+    const px = img.bitmap.data, md = msk.bitmap.data
+    const origMask = new Uint8Array(W * H)
+    for (let i = 0; i < W * H; i++) origMask[i] = md[i*4] > 128 ? 1 : 0
+    const struct = detectStructure(px, origMask, W, H)
+    if (struct === 'flat') {
+      flatFillMedian(px, origMask, W, H)
+    } else {
+      const QW = Math.max(4, Math.min(150, Math.round(W/4))), QH = Math.max(4, Math.min(150, Math.round(H/4)))
+      const qPx = new Uint8ClampedArray(QW * QH * 4), qMsk = new Uint8Array(QW * QH)
+      for (let dy = 0; dy < QH; dy++) for (let dx = 0; dx < QW; dx++) {
+        const qsx = Math.min(Math.round(dx * W/QW), W-1), qsy = Math.min(Math.round(dy * H/QH), H-1)
+        const si = (qsy*W+qsx)*4, di = (dy*QW+dx)*4
+        qPx[di]=px[si]; qPx[di+1]=px[si+1]; qPx[di+2]=px[si+2]; qPx[di+3]=255
+        qMsk[dy*QW+dx] = origMask[qsy*W+qsx]
       }
-    }
-
-    // Clustering BFS : ignore bruit (< 50px), garde texte (50–5000px)
-    const labels = new Int32Array(procW * procH).fill(-1)
-    const clusterSizes = []
-    let labelCount = 0
-    for (let i = 0; i < procW * procH; i++) {
-      if (!rawMask[i] || labels[i] !== -1) continue
-      const q = [i]; let qHead = 0
-      labels[i] = labelCount
-      while (qHead < q.length) {
-        const cur = q[qHead++]
-        const cx = cur % procW, cy = (cur / procW) | 0
-        const dirs = [[cx-1,cy],[cx+1,cy],[cx,cy-1],[cx,cy+1]]
-        for (const [nx, ny] of dirs) {
-          if (nx < 0 || ny < 0 || nx >= procW || ny >= procH) continue
-          const ni = ny * procW + nx
-          if (!rawMask[ni] || labels[ni] !== -1) continue
-          labels[ni] = labelCount; q.push(ni)
-        }
+      diffuse(qPx, qMsk, QW, QH, 15)
+      for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
+        const i = y*W+x; if (!origMask[i]) continue
+        const qsx = Math.min(Math.round(x * QW/W), QW-1), qsy = Math.min(Math.round(y * QH/H), QH-1)
+        const si = (qsy*QW+qsx)*4, i4 = i*4
+        px[i4]=qPx[si]; px[i4+1]=qPx[si+1]; px[i4+2]=qPx[si+2]
       }
-      clusterSizes.push(q.length)
-      labelCount++
+      for (let p = 0; p < 5; p++) patchMatchFill(px, origMask, W, H)
     }
-
-    const textMask = new Uint8Array(procW * procH)
-    for (let i = 0; i < procW * procH; i++) {
-      if (labels[i] === -1) continue
-      const sz = clusterSizes[labels[i]]
-      if (sz >= 50 && sz <= 5000) textMask[i] = 255
-    }
-
-    const detectedCount = textMask.reduce((s, v) => s + (v > 0 ? 1 : 0), 0)
-    console.log("Pixels texte détectés:", detectedCount)
-
-    if (detectedCount < 100) {
-      const origOut = await sharp(imageBuffer).resize(procW, procH).jpeg({ quality: 92 }).toBuffer()
-      return res.json({ result: 'data:image/jpeg;base64,' + origOut.toString('base64'), message: "Aucun texte détecté" })
-    }
-
-    // Dilate 3px autour du masque texte
-    let finalMask = dilateMask(textMask, procW, procH, 3)
-
-    const result = applyDiffusion(imgData, finalMask, procW, procH, 6)
-    const out = await sharp(result, { raw: { width: procW, height: procH, channels: 3 } })
-      .jpeg({ quality: 92 }).toBuffer()
-    res.json({ result: 'data:image/jpeg;base64,' + out.toString('base64') })
-  } catch (err) {
-    console.error('[remove-text]', err)
-    res.status(500).json({ error: err.message })
+    localLumMatch(px, origMask, W, H, 5)
+    featherBlend(px, origMask, W, H, 8)
+    localLumMatch(px, origMask, W, H, 5)
+    edgeMicroBlur(px, origMask, W, H)
+    img.quality(100)
+    const result = await img.getBufferAsync(Jimp.MIME_PNG)
+    res.json({ result: "data:image/png;base64," + result.toString("base64") })
+  } catch (e) {
+    console.error('[remove-text]', e)
+    res.status(500).json({ error: e.message })
   }
 })
 
