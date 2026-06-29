@@ -165,6 +165,10 @@ app.get("/auth/google/callback", async (req, res) => {
   }
 
   try {
+    console.log("OAuth token exchange — client_id:", GOOGLE_CLIENT_ID?.slice(0, 20))
+    console.log("OAuth token exchange — client_secret length:", GOOGLE_CLIENT_SECRET?.length)
+    console.log("OAuth token exchange — redirect_uri:", GOOGLE_REDIRECT_URI)
+    console.log("OAuth token exchange — code length:", code?.length)
     const tokenRes = await axios.post("https://oauth2.googleapis.com/token", {
       code, client_id: GOOGLE_CLIENT_ID, client_secret: GOOGLE_CLIENT_SECRET,
       redirect_uri: GOOGLE_REDIRECT_URI, grant_type: "authorization_code",
@@ -196,7 +200,9 @@ app.get("/auth/google/callback", async (req, res) => {
 
     res.redirect(`${frontendUrl}#drive_connected`)
   } catch (err) {
-    console.error("OAuth callback error:", err.response?.data || err.message)
+    console.error("OAuth callback error — status:", err.response?.status)
+    console.error("OAuth callback error — data:", JSON.stringify(err.response?.data))
+    console.error("OAuth callback error — message:", err.message)
     res.redirect(`${frontendUrl}#drive_error`)
   }
 })
