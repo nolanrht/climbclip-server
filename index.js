@@ -95,7 +95,7 @@ const supabase = SUPABASE_URL && process.env.SUPABASE_SERVICE_KEY
 const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID
 const GOOGLE_CLIENT_SECRET = process.env.GOOGLE_CLIENT_SECRET
 const sharp = require("sharp")
-const GOOGLE_REDIRECT_URI = "https://climbclip-server.onrender.com/auth/google/callback"
+const GOOGLE_REDIRECT_URI = process.env.GOOGLE_REDIRECT_URI || "https://climbclip-server-production.up.railway.app/auth/google/callback"
 const FRONTEND_URL = process.env.FRONTEND_URL || "https://climbclip.vercel.app"
 
 const upload = multer({ dest: "/tmp/uploads/", limits: { fileSize: 2 * 1024 * 1024 * 1024 } })
@@ -117,6 +117,16 @@ function updateJob(jobId, update) {
 }
 
 app.get("/health", (req, res) => res.json({ status: "ok" }))
+
+app.get("/debug/drive-config", (req, res) => {
+  res.json({
+    GOOGLE_CLIENT_ID:     GOOGLE_CLIENT_ID ? GOOGLE_CLIENT_ID.slice(0, 12) + "…" : "MISSING",
+    GOOGLE_CLIENT_SECRET: GOOGLE_CLIENT_SECRET ? "set (" + GOOGLE_CLIENT_SECRET.length + " chars)" : "MISSING",
+    GOOGLE_REDIRECT_URI,
+    FRONTEND_URL,
+    supabase_ready: !!supabase,
+  })
+})
 
 // ─── OAUTH GOOGLE DRIVE ────────────────────────────────────────────────────
 
@@ -146,7 +156,7 @@ app.get("/auth/google/callback", async (req, res) => {
     return res.redirect(`${frontendUrl}#drive_error`)
   }
   if (!supabase) {
-    console.error("OAuth callback: Supabase not initialized — check SUPABASE_URL and SUPABASE_SERVICE_KEY env vars on Render")
+    console.error("OAuth callback: Supabase not initialized — check SUPABASE_URL and SUPABASE_SERVICE_KEY env vars on Railway")
     return res.redirect(`${frontendUrl}#drive_error`)
   }
   if (!email) {
