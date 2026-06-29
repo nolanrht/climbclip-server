@@ -95,7 +95,7 @@ const supabase = SUPABASE_URL && process.env.SUPABASE_SERVICE_KEY
 const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID
 const GOOGLE_CLIENT_SECRET = process.env.GOOGLE_CLIENT_SECRET
 const sharp = require("sharp")
-const GOOGLE_REDIRECT_URI = process.env.GOOGLE_REDIRECT_URI || "https://climbclip-server.onrender.com/auth/google/callback"
+const GOOGLE_REDIRECT_URI = "https://climbclip-server.onrender.com/auth/google/callback"
 const FRONTEND_URL = process.env.FRONTEND_URL || "https://climbclip.vercel.app"
 
 const upload = multer({ dest: "/tmp/uploads/", limits: { fileSize: 2 * 1024 * 1024 * 1024 } })
@@ -117,16 +117,6 @@ function updateJob(jobId, update) {
 }
 
 app.get("/health", (req, res) => res.json({ status: "ok" }))
-
-app.get("/debug/drive-config", (req, res) => {
-  res.json({
-    GOOGLE_CLIENT_ID:     GOOGLE_CLIENT_ID ? GOOGLE_CLIENT_ID.slice(0, 12) + "…" : "MISSING",
-    GOOGLE_CLIENT_SECRET: GOOGLE_CLIENT_SECRET ? "set (" + GOOGLE_CLIENT_SECRET.length + " chars)" : "MISSING",
-    GOOGLE_REDIRECT_URI,
-    FRONTEND_URL,
-    supabase_ready: !!supabase,
-  })
-})
 
 // ─── OAUTH GOOGLE DRIVE ────────────────────────────────────────────────────
 
@@ -156,7 +146,7 @@ app.get("/auth/google/callback", async (req, res) => {
     return res.redirect(`${frontendUrl}#drive_error`)
   }
   if (!supabase) {
-    console.error("OAuth callback: Supabase not initialized — check SUPABASE_URL and SUPABASE_SERVICE_KEY env vars on Railway")
+    console.error("OAuth callback: Supabase not initialized — check SUPABASE_URL and SUPABASE_SERVICE_KEY env vars on Render")
     return res.redirect(`${frontendUrl}#drive_error`)
   }
   if (!email) {
@@ -165,10 +155,6 @@ app.get("/auth/google/callback", async (req, res) => {
   }
 
   try {
-    console.log("OAuth token exchange — client_id:", GOOGLE_CLIENT_ID?.slice(0, 20))
-    console.log("OAuth token exchange — client_secret length:", GOOGLE_CLIENT_SECRET?.length)
-    console.log("OAuth token exchange — redirect_uri:", GOOGLE_REDIRECT_URI)
-    console.log("OAuth token exchange — code length:", code?.length)
     const tokenRes = await axios.post("https://oauth2.googleapis.com/token", {
       code, client_id: GOOGLE_CLIENT_ID, client_secret: GOOGLE_CLIENT_SECRET,
       redirect_uri: GOOGLE_REDIRECT_URI, grant_type: "authorization_code",
@@ -200,9 +186,7 @@ app.get("/auth/google/callback", async (req, res) => {
 
     res.redirect(`${frontendUrl}#drive_connected`)
   } catch (err) {
-    console.error("OAuth callback error — status:", err.response?.status)
-    console.error("OAuth callback error — data:", JSON.stringify(err.response?.data))
-    console.error("OAuth callback error — message:", err.message)
+    console.error("OAuth callback error:", err.response?.data || err.message)
     res.redirect(`${frontendUrl}#drive_error`)
   }
 })
