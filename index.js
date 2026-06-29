@@ -118,6 +118,15 @@ function updateJob(jobId, update) {
 
 app.get("/health", (req, res) => res.json({ status: "ok" }))
 
+app.get("/auth/google/config-check", (req, res) => {
+  res.json({
+    client_id_first20: (GOOGLE_CLIENT_ID || "").slice(0, 20),
+    client_id_last5:   (GOOGLE_CLIENT_ID || "").slice(-5),
+    secret_length:     (GOOGLE_CLIENT_SECRET || "").length,
+    redirect_uri:      GOOGLE_REDIRECT_URI,
+  })
+})
+
 // ─── OAUTH GOOGLE DRIVE ────────────────────────────────────────────────────
 
 app.get("/auth/google", (req, res) => {
