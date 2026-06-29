@@ -1564,10 +1564,33 @@ app.post('/retouch/remove-text', uploadLimiter, uploadMem.single('image'), async
     const { data: gray } = await sharp(imageBuffer)
       .resize(procW, procH).greyscale().raw().toBuffer({ resolveWithObject: true })
 
-    // Seuillage adaptatif : texte sombre (< 80) ou texte clair sur fond sombre (> 200)
     const rawMask = new Uint8Array(procW * procH)
+
+    // Cas 1 : texte sombre sur fond clair
+    // Cas 2 : texte clair sur fond sombre
     for (let i = 0; i < procW * procH; i++) {
-      if (gray[i] < 80 || gray[i] > 200) rawMask[i] = 1
+      if (gray[i] < 80 || gray[i] > 180) rawMask[i] = 1
+    }
+
+    // Cas 3 : texte coloré — fort contraste RGB avec les voisins sur 2px
+    for (let y = 2; y < procH - 2; y++) {
+      for (let x = 2; x < procW - 2; x++) {
+        const i = y * procW + x
+        const i3 = i * 3
+        let maxDiff = 0
+        for (let dy = -2; dy <= 2; dy++) {
+          for (let dx = -2; dx <= 2; dx++) {
+            if (!dx && !dy) continue
+            const ni = (y+dy) * procW + (x+dx), ni3 = ni * 3
+            maxDiff = Math.max(maxDiff,
+              Math.abs(imgData[i3]   - imgData[ni3]),
+              Math.abs(imgData[i3+1] - imgData[ni3+1]),
+              Math.abs(imgData[i3+2] - imgData[ni3+2])
+            )
+          }
+        }
+        if (maxDiff > 40) rawMask[i] = 1
+      }
     }
 
     // Clustering BFS : ignore bruit (< 50px), garde texte (50–5000px)
@@ -1601,7 +1624,12 @@ app.post('/retouch/remove-text', uploadLimiter, uploadMem.single('image'), async
     }
 
     const detectedCount = textMask.reduce((s, v) => s + (v > 0 ? 1 : 0), 0)
-    console.log(`[remove-text] ${detectedCount} pixels détectés (${labelCount} clusters, ${clusterSizes.filter(s => s >= 50 && s <= 5000).length} retenus)`)
+    console.log("Pixels texte détectés:", detectedCount)
+
+    if (detectedCount < 100) {
+      const origOut = await sharp(imageBuffer).resize(procW, procH).jpeg({ quality: 92 }).toBuffer()
+      return res.json({ result: 'data:image/jpeg;base64,' + origOut.toString('base64'), message: "Aucun texte détecté" })
+    }
 
     // Dilate 3px autour du masque texte
     let finalMask = dilateMask(textMask, procW, procH, 3)
