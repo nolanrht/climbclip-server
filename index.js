@@ -1445,6 +1445,26 @@ app.post("/retouch/inpaint", uploadLimiter, async (req, res) => {
 
 
 
+// ── Dilatation de masque ─────────────────────────────────────────────────────
+function dilateMask(mask, width, height, radius) {
+  const dilated = Buffer.from(mask)
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) {
+      if (mask[y * width + x] > 128) {
+        for (let dy = -radius; dy <= radius; dy++) {
+          for (let dx = -radius; dx <= radius; dx++) {
+            const nx = x + dx, ny = y + dy
+            if (nx >= 0 && ny >= 0 && nx < width && ny < height) {
+              dilated[ny * width + nx] = 255
+            }
+          }
+        }
+      }
+    }
+  }
+  return dilated
+}
+
 // ── Retrait filigrane ────────────────────────────────────────────────────────
 
 app.post('/retouch/remove-watermark', uploadLimiter, uploadMem.single('image'), async (req, res) => {
