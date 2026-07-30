@@ -26,6 +26,7 @@ const ALLOWED_ORIGINS = [
 ]
 
 const app = express()
+app.set("trust proxy", 1)
 app.use(helmet({ crossOriginResourcePolicy: false }))
 app.use(cors({
   origin: (origin, cb) => {
@@ -749,12 +750,13 @@ async function uploadToStorage(filePath, storagePath, contentType) {
   if (!supabase || !fs.existsSync(filePath)) return null
   try {
     let buffer = fs.readFileSync(filePath)
-    const { error } = await supabase.storage.from("clips").upload(storagePath, buffer, { contentType, upsert: false })
+    const blob = new Blob([buffer], { type: contentType })
     buffer = null
-    if (error) throw error
+    const { error } = await supabase.storage.from("clips").upload(storagePath, blob, { contentType, upsert: true })
+    if (error) { console.error("uploadToStorage error:", error.message, error.statusCode, error.error); return null }
     const { data } = supabase.storage.from("clips").getPublicUrl(storagePath)
     return data.publicUrl
-  } catch (e) { console.error("uploadToStorage:", e.message); return null }
+  } catch (e) { console.error("uploadToStorage exception:", e.message); return null }
 }
 
 // ─── GÉNÉRATION CAPSULES (bypass duplicate detection) ──────────────────────
