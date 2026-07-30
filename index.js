@@ -503,7 +503,7 @@ app.post("/generate", generateLimiter, async (req, res) => {
   }
 
   const jobId = `job_${Date.now()}`
-  jobs[jobId] = { status: "processing", progress: 0, clips: null, error: null }
+  jobs[jobId] = { status: "processing", progress: 0, clips: null, error: null, startedAt: Date.now() }
   res.json({ jobId })
   processVideo({ jobId, ...sanitized })
 })
@@ -516,9 +516,12 @@ app.get("/status/:jobId", (req, res) => {
 
 setInterval(() => {
   const now = Date.now()
+  const THIRTY_MIN = 30 * 60 * 1000
   for (const jobId of Object.keys(jobs)) {
     const job = jobs[jobId]
-    if ((job.status === "done" || job.status === "error") && job.completedAt && now - job.completedAt > 30 * 60 * 1000) {
+    if ((job.status === "done" || job.status === "error") && job.completedAt && now - job.completedAt > THIRTY_MIN) {
+      delete jobs[jobId]; delete sseClients[jobId]
+    } else if (job.status === "processing" && job.startedAt && now - job.startedAt > THIRTY_MIN) {
       delete jobs[jobId]; delete sseClients[jobId]
     }
   }
@@ -778,6 +781,8 @@ async function processVideo({ jobId, videoUrls, videoPaths, prompt, options, mus
   const tmpDir = "/tmp"
   const inputPaths = []
   const clips = []
+  let concatPath = null
+  let stabPath = null
 
   try {
     updateJob(jobId, { status:"processing", progress:5 })
@@ -803,7 +808,7 @@ async function processVideo({ jobId, videoUrls, videoPaths, prompt, options, mus
     let mainInput = inputPaths[0]
     if (inputPaths.length > 1) {
       const listPath = path.join(tmpDir, `list_${Date.now()}.txt`)
-      const concatPath = path.join(tmpDir, `concat_${Date.now()}.mp4`)
+      concatPath = path.join(tmpDir, `concat_${Date.now()}.mp4`)
       fs.writeFileSync(listPath, inputPaths.map(p => `file '${p}'`).join("\n"))
       await new Promise((resolve, reject) => {
         ffmpeg().input(listPath).inputOptions(["-f","concat","-safe","0"]).outputOptions(["-c copy"]).output(concatPath).on("end", resolve).on("error", reject).run()
@@ -874,6 +879,7 @@ async function processVideo({ jobId, videoUrls, videoPaths, prompt, options, mus
       }
 
       for (const p of inputPaths) { if (fs.existsSync(p)) try { fs.unlinkSync(p) } catch {} }
+      if (concatPath && fs.existsSync(concatPath)) try { fs.unlinkSync(concatPath) } catch {}
       updateJob(jobId, { status:"done", progress:100, clips, completedAt: Date.now() })
       return
     }
@@ -886,7 +892,7 @@ async function processVideo({ jobId, videoUrls, videoPaths, prompt, options, mus
 
     if (stabilize) {
       try {
-        const stabPath = path.join(tmpDir, `stab_${Date.now()}.mp4`)
+        stabPath = path.join(tmpDir, `stab_${Date.now()}.mp4`)
         const transformsPath = path.join(tmpDir, `transforms_${Date.now()}.trf`)
         await new Promise((resolve, reject) => { ffmpeg(mainInput).outputOptions([`-vf vidstabdetect=stepsize=6:shakiness=8:accuracy=9:result=${transformsPath}`,"-f null"]).output("/dev/null").on("end", resolve).on("error", reject).run() })
         await new Promise((resolve, reject) => { ffmpeg(mainInput).outputOptions([`-vf vidstabtransform=input=${transformsPath}:zoom=1:smoothing=15,unsharp=5:5:0.8:3:3:0.4`,"-c:v libx264","-c:a copy"]).output(stabPath).on("end", resolve).on("error", reject).run() })
@@ -1071,12 +1077,16 @@ Règles timestamps: start+duration<=${Math.round(totalDuration)}, durées 10-30s
 
     if (musicPath && fs.existsSync(musicPath)) fs.unlinkSync(musicPath)
     for (const p of inputPaths) { if (fs.existsSync(p)) try { fs.unlinkSync(p) } catch {} }
+    if (concatPath && fs.existsSync(concatPath)) try { fs.unlinkSync(concatPath) } catch {}
+    if (stabPath && fs.existsSync(stabPath)) try { fs.unlinkSync(stabPath) } catch {}
 
     updateJob(jobId, { status:"done", progress:100, clips, completedAt: Date.now() })
 
   } catch (err) {
     console.error(err)
     for (const p of inputPaths) { if (fs.existsSync(p)) try { fs.unlinkSync(p) } catch {} }
+    if (concatPath && fs.existsSync(concatPath)) try { fs.unlinkSync(concatPath) } catch {}
+    if (stabPath && fs.existsSync(stabPath)) try { fs.unlinkSync(stabPath) } catch {}
     updateJob(jobId, { status:"error", progress:0, error:err.message, completedAt: Date.now() })
   }
 }
@@ -1436,6 +1446,8 @@ app.post("/retouch/inpaint", uploadLimiter, async (req, res) => {
     // PNG lossless qualite maximale
     img.quality(100)
     const result = await img.getBufferAsync(Jimp.MIME_PNG)
+    img.bitmap.data = null
+    msk.bitmap.data = null
     res.json({ result: "data:image/png;base64," + result.toString("base64") })
   } catch (e) {
     console.error('[inpaint]', e)
@@ -1590,6 +1602,8 @@ app.post('/retouch/remove-text', express.json({ limit: '50mb' }), async (req, re
     edgeMicroBlur(px, origMask, W, H)
     img.quality(100)
     const result = await img.getBufferAsync(Jimp.MIME_PNG)
+    img.bitmap.data = null
+    msk.bitmap.data = null
     res.json({ result: "data:image/png;base64," + result.toString("base64") })
   } catch (e) {
     console.error('[remove-text]', e)
