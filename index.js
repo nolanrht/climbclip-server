@@ -93,6 +93,9 @@ const supabase = SUPABASE_URL && process.env.SUPABASE_SERVICE_KEY
   ? createClient(SUPABASE_URL, process.env.SUPABASE_SERVICE_KEY, { realtime: { transport: ws } })
   : null
 
+console.log("SUPABASE_URL:", process.env.SUPABASE_URL ? "SET" : "MISSING")
+console.log("SUPABASE_SERVICE_KEY:", process.env.SUPABASE_SERVICE_KEY ? "SET" : "MISSING")
+
 const sharp = require("sharp")
 const { google } = require("googleapis")
 const FRONTEND_URL = process.env.FRONTEND_URL || "https://climbclip.vercel.app"
@@ -881,9 +884,13 @@ async function processVideo({ jobId, videoUrls, videoPaths, prompt, options, mus
             .run()
         })
 
-        // Upload to storage — no base64 fallback to avoid loading whole video into RAM
         const uniqueId = `${Date.now()}_${ci}`
         const storageUrl = await uploadToStorage(outputPath, `clips/${uniqueId}.mp4`, "video/mp4")
+        let capsuleBase64 = null
+        if (!storageUrl && fs.existsSync(outputPath)) {
+          console.warn(`Storage failed for capsule ${ci}, fallback base64`)
+          capsuleBase64 = `data:video/mp4;base64,${fs.readFileSync(outputPath).toString("base64")}`
+        }
         if (fs.existsSync(outputPath)) fs.unlinkSync(outputPath)
 
         // Thumbnail — small, safe to base64 as fallback
@@ -900,7 +907,7 @@ async function processVideo({ jobId, videoUrls, videoPaths, prompt, options, mus
         } catch {}
         if (fs.existsSync(thumbPath)) fs.unlinkSync(thumbPath)
 
-        clips.push({ name: clip.name, storageUrl, base64: null, thumbnail, duration: clip.duration })
+        clips.push({ name: clip.name, storageUrl, base64: capsuleBase64, thumbnail, duration: clip.duration })
         updateJob(jobId, { progress: 30 + Math.floor((ci + 1) / durations.length * 70) })
 
         // Explicit GC hint between clips
