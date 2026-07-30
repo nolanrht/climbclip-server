@@ -34,7 +34,7 @@ app.use(cors({
   },
   credentials: true,
 }))
-app.use(express.json({ limit: "50mb" }))
+app.use(express.json({ limit: "20mb" }))
 
 // ─── RATE LIMITING ──────────────────────────────────────────────────────────
 const generateLimiter = rateLimit({ windowMs: 60_000, max: 10, standardHeaders: true, legacyHeaders: false, message: { error: "Trop de requêtes — réessaie dans une minute." } })
@@ -107,6 +107,13 @@ const upload = multer({ dest: "/tmp/uploads/", limits: { fileSize: 2 * 1024 * 10
 const uploadMem = multer({ storage: multer.memoryStorage(), limits: { fileSize: 50 * 1024 * 1024 } })
 const jobs = {}
 const sseClients = {}
+
+// ─── MEMORY MONITORING ──────────────────────────────────────────────────────
+setInterval(() => {
+  const used = process.memoryUsage().heapUsed / 1024 / 1024
+  console.log(`Memory: ${Math.round(used)}MB`)
+  if (global.gc) global.gc()
+}, 30000)
 
 function pushSSE(jobId, data) {
   if (!sseClients[jobId]) return
@@ -350,6 +357,7 @@ app.post("/upscale", uploadLimiter, upload.single("file"), async (req, res) => {
           .on("end", resolve)
           .on("error", (err, _stdout, stderr) => {
             console.error("[upscale] ffmpeg error:", stderr?.slice(-500))
+            if (fs.existsSync(outputPath)) try { fs.unlinkSync(outputPath) } catch {}
             reject(err)
           })
           .run()
@@ -526,6 +534,13 @@ setInterval(() => {
     }
   }
 }, 5 * 60 * 1000)
+
+setInterval(() => {
+  const now = Date.now()
+  Object.keys(jobs).forEach(id => {
+    if (now - parseInt(id.replace("job_", "")) > 1800000) { delete jobs[id]; delete sseClients[id] }
+  })
+}, 300000)
 
 // ─── HELPERS ───────────────────────────────────────────────────────────────
 
@@ -733,8 +748,9 @@ async function analyzeEffects(prompt, totalDuration, options, zoomIntensity, spe
 async function uploadToStorage(filePath, storagePath, contentType) {
   if (!supabase || !fs.existsSync(filePath)) return null
   try {
-    const buffer = fs.readFileSync(filePath)
+    let buffer = fs.readFileSync(filePath)
     const { error } = await supabase.storage.from("clips").upload(storagePath, buffer, { contentType, upsert: false })
+    buffer = null
     if (error) throw error
     const { data } = supabase.storage.from("clips").getPublicUrl(storagePath)
     return data.publicUrl
@@ -848,7 +864,7 @@ async function processVideo({ jobId, videoUrls, videoPaths, prompt, options, mus
             ])
             .output(outputPath)
             .on("end", resolve)
-            .on("error", (err, stdout, stderr) => { console.error("FFmpeg capsule:", stderr?.slice(-300)); reject(err) })
+            .on("error", (err, stdout, stderr) => { console.error("FFmpeg capsule:", stderr?.slice(-300)); if (fs.existsSync(outputPath)) try { fs.unlinkSync(outputPath) } catch {}; reject(err) })
             .run()
         })
 
@@ -1049,7 +1065,7 @@ Règles timestamps: start+duration<=${Math.round(totalDuration)}, durées 10-30s
         }
         cmd.outputOptions(outputOpts).output(outputPath)
           .on("end", resolve)
-          .on("error", (err, stdout, stderr) => { console.error("FFmpeg:", stderr?.slice(-500)); reject(err) })
+          .on("error", (err, stdout, stderr) => { console.error("FFmpeg:", stderr?.slice(-500)); if (fs.existsSync(outputPath)) try { fs.unlinkSync(outputPath) } catch {}; reject(err) })
           .run()
       })
 
@@ -1372,7 +1388,7 @@ function featherBlend(px, origMask, w, h, R) {
 }
 
 
-app.post("/retouch/inpaint", uploadLimiter, async (req, res) => {
+app.post("/retouch/inpaint", uploadLimiter, express.json({ limit: "50mb" }), async (req, res) => {
   try {
     const { image, mask } = req.body
     if (!image || !mask) return res.status(400).json({ error: "image ou masque manquant" })
