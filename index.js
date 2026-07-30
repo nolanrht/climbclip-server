@@ -747,16 +747,27 @@ async function analyzeEffects(prompt, totalDuration, options, zoomIntensity, spe
 }
 
 async function uploadToStorage(filePath, storagePath, contentType) {
-  if (!supabase || !fs.existsSync(filePath)) return null
+  if (!SUPABASE_URL || !process.env.SUPABASE_SERVICE_KEY || !fs.existsSync(filePath)) return null
   try {
-    let buffer = fs.readFileSync(filePath)
-    const blob = new Blob([buffer], { type: contentType })
-    buffer = null
-    const { error } = await supabase.storage.from("clips").upload(storagePath, blob, { contentType, upsert: true })
-    if (error) { console.error("uploadToStorage error:", error.message, error.statusCode, error.error); return null }
-    const { data } = supabase.storage.from("clips").getPublicUrl(storagePath)
-    return data.publicUrl
-  } catch (e) { console.error("uploadToStorage exception:", e.message); return null }
+    const fileBuffer = fs.readFileSync(filePath)
+    const { data: urlData } = supabase.storage.from("clips").getPublicUrl(storagePath)
+    await axios({
+      method: "POST",
+      url: `${SUPABASE_URL}/storage/v1/object/clips/${storagePath}`,
+      headers: {
+        "Authorization": `Bearer ${process.env.SUPABASE_SERVICE_KEY}`,
+        "Content-Type": contentType,
+        "x-upsert": "true",
+      },
+      data: fileBuffer,
+      maxContentLength: Infinity,
+      maxBodyLength: Infinity,
+    })
+    return urlData.publicUrl
+  } catch (e) {
+    console.error("uploadToStorage failed:", e.response?.status, e.response?.data?.error || e.message)
+    return null
+  }
 }
 
 // ─── GÉNÉRATION CAPSULES (bypass duplicate detection) ──────────────────────
