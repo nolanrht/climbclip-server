@@ -875,6 +875,7 @@ async function processVideo({ jobId, videoUrls, videoPaths, prompt, options, mus
               "-crf 18",
               `-vf ${formatFilter}`,
               "-map_metadata -1",
+              `-b:v ${Math.round(3000 * (0.95 + Math.random() * 0.10))}k`,
               "-threads 2",
               "-c:a aac", "-b:a 128k",
             ])
@@ -1065,12 +1066,13 @@ Règles timestamps: start+duration<=${Math.round(totalDuration)}, durées 10-30s
 
       await new Promise((resolve, reject) => {
         let cmd = ffmpeg(mainInput).setStartTime(clip.start).setDuration(clip.duration)
+        const bv = Math.round(bitrate * (0.95 + Math.random() * 0.10))
         const baseOpts = [
           "-movflags faststart", `-c:v ${codec}`, "-preset fast", `-crf ${crf}`,
           "-map_metadata -1",
-          `-b:v ${Math.floor(bitrate+Math.random()*500)}k`,
-          `-maxrate ${Math.floor(bitrate*1.4+Math.random()*500)}k`,
-          `-bufsize ${bitrate*2}k`,
+          `-b:v ${bv}k`,
+          `-maxrate ${Math.round(bv * 1.4)}k`,
+          `-bufsize ${bv * 2}k`,
         ]
         let outputOpts
         if (musicPath && fs.existsSync(musicPath)) {
