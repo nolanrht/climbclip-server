@@ -316,8 +316,11 @@ app.post("/upscale", uploadLimiter, upload.single("file"), async (req, res) => {
 
   try {
     if (isImage) {
-      const inputBuf = fs.readFileSync(filePath)
+      let inputBuf = fs.readFileSync(filePath)
       fs.unlinkSync(filePath)
+
+      // Cap input size before upscaling to limit peak RAM
+      inputBuf = await sharp(inputBuf).resize(1920, 1080, { fit: "inside", withoutEnlargement: true }).toBuffer()
 
       const meta = await sharp(inputBuf).metadata()
       const newW = (meta.width  || 512) * scale
@@ -332,6 +335,7 @@ app.post("/upscale", uploadLimiter, upload.single("file"), async (req, res) => {
         .toFormat("jpeg", { quality: 95 })
         .toBuffer()
 
+      inputBuf = null
       console.log(`[upscale] sharp done ${(outputBuf.length/1024).toFixed(0)} KB`)
 
       const storageKey = `upscaled/${Date.now()}_${Math.random().toString(36).slice(2)}.jpg`
@@ -859,53 +863,51 @@ async function processVideo({ jobId, videoUrls, videoPaths, prompt, options, mus
       for (let ci = 0; ci < durations.length; ci++) {
         const clip = durations[ci]
         const outputPath = path.join(tmpDir, `capsule_${ci}_${Date.now()}.mp4`)
-
-        await new Promise((resolve, reject) => {
-          ffmpeg(mainInput)
-            .setStartTime(clip.start)
-            .setDuration(clip.duration)
-            .outputOptions([
-              "-movflags faststart",
-              "-c:v libx264",
-              "-preset slow",
-              "-crf 18",
-              `-vf ${capsuleVf}`,
-              "-map_metadata -1",
-              `-b:v ${Math.round(3000 * (0.95 + Math.random() * 0.10))}k`,
-              "-threads 2",
-              "-c:a aac", "-b:a 128k",
-            ])
-            .output(outputPath)
-            .on("end", resolve)
-            .on("error", (err, stdout, stderr) => { console.error("FFmpeg capsule:", stderr?.slice(-300)); if (fs.existsSync(outputPath)) try { fs.unlinkSync(outputPath) } catch {}; reject(err) })
-            .run()
-        })
-
-        const uniqueId = `${Date.now()}_${ci}`
-        const storageUrl = await uploadToStorage(outputPath, `clips/${uniqueId}.mp4`, "video/mp4")
-        let capsuleBase64 = null
-        if (!storageUrl && fs.existsSync(outputPath)) {
-          console.warn(`Storage failed for capsule ${ci}, fallback base64`)
-          capsuleBase64 = `data:video/mp4;base64,${fs.readFileSync(outputPath).toString("base64")}`
-        }
-        if (fs.existsSync(outputPath)) fs.unlinkSync(outputPath)
-
-        // Thumbnail — small, safe to base64 as fallback
-        let thumbnail = null
         const thumbPath = path.join(tmpDir, `thumb_${ci}_${Date.now()}.jpg`)
         try {
-          await execAsync(`ffmpeg -ss ${clip.start + 0.5} -i "${mainInput}" -vframes 1 -q:v 5 -vf "scale=320:-2" "${thumbPath}" -y 2>/dev/null`)
-          const thumbStorageUrl = await uploadToStorage(thumbPath, `thumbs/${uniqueId}.jpg`, "image/jpeg")
-          if (thumbStorageUrl) {
-            thumbnail = thumbStorageUrl
-          } else if (fs.existsSync(thumbPath)) {
-            thumbnail = `data:image/jpeg;base64,${fs.readFileSync(thumbPath).toString("base64")}`
-          }
-        } catch {}
-        if (fs.existsSync(thumbPath)) fs.unlinkSync(thumbPath)
+          await new Promise((resolve, reject) => {
+            ffmpeg(mainInput)
+              .setStartTime(clip.start)
+              .setDuration(clip.duration)
+              .outputOptions([
+                "-movflags faststart",
+                "-c:v libx264",
+                "-preset slow",
+                "-crf 18",
+                `-vf ${capsuleVf}`,
+                "-map_metadata -1",
+                `-b:v ${Math.round(3000 * (0.95 + Math.random() * 0.10))}k`,
+                "-threads 2",
+                "-c:a aac", "-b:a 128k",
+              ])
+              .output(outputPath)
+              .on("end", resolve)
+              .on("error", (err, stdout, stderr) => { console.error("FFmpeg capsule:", stderr?.slice(-300)); reject(err) })
+              .run()
+          })
 
-        clips.push({ name: clip.name, storageUrl, base64: capsuleBase64, thumbnail, duration: clip.duration })
-        updateJob(jobId, { progress: 30 + Math.floor((ci + 1) / durations.length * 70) })
+          const uniqueId = `${Date.now()}_${ci}`
+          const storageUrl = await uploadToStorage(outputPath, `clips/${uniqueId}.mp4`, "video/mp4")
+          let capsuleBase64 = null
+          if (!storageUrl && fs.existsSync(outputPath)) {
+            console.warn(`Storage failed for capsule ${ci}, fallback base64`)
+            capsuleBase64 = `data:video/mp4;base64,${fs.readFileSync(outputPath).toString("base64")}`
+          }
+
+          // Thumbnail
+          let thumbnail = null
+          try {
+            await execAsync(`ffmpeg -ss ${clip.start + 0.5} -i "${mainInput}" -vframes 1 -q:v 5 -vf "scale=320:-2" "${thumbPath}" -y 2>/dev/null`)
+            const thumbStorageUrl = await uploadToStorage(thumbPath, `thumbs/${uniqueId}.jpg`, "image/jpeg")
+            thumbnail = thumbStorageUrl || (fs.existsSync(thumbPath) ? `data:image/jpeg;base64,${fs.readFileSync(thumbPath).toString("base64")}` : null)
+          } catch {}
+
+          clips.push({ name: clip.name, storageUrl, base64: capsuleBase64, thumbnail, duration: clip.duration })
+          updateJob(jobId, { progress: 30 + Math.floor((ci + 1) / durations.length * 70) })
+        } finally {
+          try { if (fs.existsSync(outputPath)) fs.unlinkSync(outputPath) } catch {}
+          try { if (fs.existsSync(thumbPath))  fs.unlinkSync(thumbPath)  } catch {}
+        }
 
         // Explicit GC hint between clips
         if (global.gc) global.gc()
@@ -1012,117 +1014,116 @@ Règles timestamps: start+duration<=${Math.round(totalDuration)}, durées 10-30s
     for (let ci = 0; ci < durations.length; ci++) {
       const clip = durations[ci]
       const outputPath = path.join(tmpDir, `clip_${ci}_${Date.now()}.mp4`)
-      const vfFilters = []
-      let atempoVal = "1.0"
-
-      if (effects?.speedramp?.enabled && effects.speedramp.segments?.length > 0) {
-        const avgSpeed = effects.speedramp.segments.reduce((s, seg) => s+seg.speed, 0) / effects.speedramp.segments.length
-        const clampedSpeed = Math.max(0.5, Math.min(2.0, avgSpeed))
-        vfFilters.push(`setpts=${(1/clampedSpeed).toFixed(3)}*PTS`)
-        atempoVal = clampedSpeed.toFixed(2)
-      }
-
-      if (options?.includes("Miroir")) vfFilters.push("hflip")
-      vfFilters.push(formatFilter)
-
-      if (effects?.autozoom?.enabled) {
-        const intensity = Math.min(effects.autozoom.intensity||1.15, 1.3)
-        vfFilters.push(`scale=iw*${intensity.toFixed(3)}:ih*${intensity.toFixed(3)},crop=iw/${intensity.toFixed(3)}:ih/${intensity.toFixed(3)}`)
-      }
-
-      const gradeFilter = getColorGradeFilter(colorGrade)
-      if (gradeFilter) vfFilters.push(gradeFilter)
-      vfFilters.push(`noise=alls=4:allf=t+u`)
-      vfFilters.push(`vignette=PI/5`)
-
-      const transFilter = buildTransitionFilter(transition, clip.duration)
-      if (transFilter) vfFilters.push(transFilter)
-
-      const textFilter = buildTextOverlayFilter(textOverlay, clip.duration, targetFormat, textEffect || "default")
-      if (textFilter) vfFilters.push(textFilter)
-
-      if (subtitles.length > 0) {
-        const styledSubFilter = buildStyledSubtitlesFilter(subtitles, clip.start, clip.duration, targetFormat, subtitleStyle || "tiktok")
-        if (styledSubFilter) vfFilters.push(styledSubFilter)
-      }
-
-      if (watermark) vfFilters.push(buildWatermarkFilter(targetFormat))
-      if (addIntroOutro) vfFilters.push(buildIntroOutroFilter(clip.duration, targetFormat))
-
-      const vfString = vfFilters.join(",")
-
-      // Build atempo chain for speed-ramped audio
-      let atempoChain = ""
-      if (atempoVal !== "1.0") {
-        const speed = parseFloat(atempoVal)
-        if (speed >= 0.5 && speed <= 2.0) atempoChain = `,atempo=${speed}`
-        else if (speed > 2.0) atempoChain = `,atempo=2.0,atempo=${(speed/2.0).toFixed(2)}`
-        else if (speed < 0.5) atempoChain = `,atempo=0.5,atempo=${(speed/0.5).toFixed(2)}`
-      }
-      const vocalVol = vocalVolume !== undefined ? vocalVolume : 0.3
-
-      await new Promise((resolve, reject) => {
-        let cmd = ffmpeg(mainInput).setStartTime(clip.start).setDuration(clip.duration)
-        const bv = Math.round(bitrate * (0.95 + Math.random() * 0.10))
-        const baseOpts = [
-          "-movflags faststart", `-c:v ${codec}`, "-preset fast", `-crf ${crf}`,
-          "-map_metadata -1",
-          `-b:v ${bv}k`,
-          `-maxrate ${Math.round(bv * 1.4)}k`,
-          `-bufsize ${bv * 2}k`,
-        ]
-        let outputOpts
-        if (musicPath && fs.existsSync(musicPath)) {
-          // Mix voice (from video) + music with amix — vocalVol controls voice level
-          cmd = cmd.input(musicPath)
-          const fc = `[0:v]${vfString}[vout];[0:a]volume=${vocalVol}${atempoChain}[va];[1:a]volume=0.85[ma];[va][ma]amix=inputs=2:duration=first[aout]`
-          outputOpts = [...baseOpts, "-c:a aac", "-b:a 192k", `-filter_complex ${fc}`, "-map [vout]", "-map [aout]", "-shortest"]
-        } else {
-          const audioFilters = atempoChain ? [atempoChain.slice(1)] : []
-          outputOpts = [...baseOpts, `-vf ${vfString}`, "-c:a aac", "-b:a 192k"]
-          if (audioFilters.length > 0) outputOpts.push(`-af ${audioFilters.join(",")}`)
-        }
-        cmd.outputOptions(outputOpts).output(outputPath)
-          .on("end", resolve)
-          .on("error", (err, stdout, stderr) => { console.error("FFmpeg:", stderr?.slice(-500)); if (fs.existsSync(outputPath)) try { fs.unlinkSync(outputPath) } catch {}; reject(err) })
-          .run()
-      })
-
       const thumbPath = path.join(tmpDir, `thumb_${ci}_${Date.now()}.jpg`)
-      try { await execAsync(`ffmpeg -i "${outputPath}" -ss 0.5 -vframes 1 -q:v 2 "${thumbPath}" -y 2>/dev/null`) } catch {}
+      try {
+        const vfFilters = []
+        let atempoVal = "1.0"
 
-      const uniqueId = `${Date.now()}_${ci}_${Math.random().toString(36).slice(2)}`
-      const storageUrl = await uploadToStorage(outputPath, `clips/${uniqueId}.mp4`, "video/mp4")
-      const thumbStorageUrl = await uploadToStorage(thumbPath, `thumbs/${uniqueId}.jpg`, "image/jpeg")
+        if (effects?.speedramp?.enabled && effects.speedramp.segments?.length > 0) {
+          const avgSpeed = effects.speedramp.segments.reduce((s, seg) => s+seg.speed, 0) / effects.speedramp.segments.length
+          const clampedSpeed = Math.max(0.5, Math.min(2.0, avgSpeed))
+          vfFilters.push(`setpts=${(1/clampedSpeed).toFixed(3)}*PTS`)
+          atempoVal = clampedSpeed.toFixed(2)
+        }
 
-      let base64 = null
-      if (!storageUrl) {
-        console.warn(`Storage failed for clip ${ci}, fallback base64`)
-        base64 = `data:video/mp4;base64,${fs.readFileSync(outputPath).toString("base64")}`
+        if (options?.includes("Miroir")) vfFilters.push("hflip")
+        vfFilters.push(formatFilter)
+
+        if (effects?.autozoom?.enabled) {
+          const intensity = Math.min(effects.autozoom.intensity||1.15, 1.3)
+          vfFilters.push(`scale=iw*${intensity.toFixed(3)}:ih*${intensity.toFixed(3)},crop=iw/${intensity.toFixed(3)}:ih/${intensity.toFixed(3)}`)
+        }
+
+        const gradeFilter = getColorGradeFilter(colorGrade)
+        if (gradeFilter) vfFilters.push(gradeFilter)
+        vfFilters.push(`noise=alls=4:allf=t+u`)
+        vfFilters.push(`vignette=PI/5`)
+
+        const transFilter = buildTransitionFilter(transition, clip.duration)
+        if (transFilter) vfFilters.push(transFilter)
+
+        const textFilter = buildTextOverlayFilter(textOverlay, clip.duration, targetFormat, textEffect || "default")
+        if (textFilter) vfFilters.push(textFilter)
+
+        if (subtitles.length > 0) {
+          const styledSubFilter = buildStyledSubtitlesFilter(subtitles, clip.start, clip.duration, targetFormat, subtitleStyle || "tiktok")
+          if (styledSubFilter) vfFilters.push(styledSubFilter)
+        }
+
+        if (watermark) vfFilters.push(buildWatermarkFilter(targetFormat))
+        if (addIntroOutro) vfFilters.push(buildIntroOutroFilter(clip.duration, targetFormat))
+
+        const vfString = vfFilters.join(",")
+
+        // Build atempo chain for speed-ramped audio
+        let atempoChain = ""
+        if (atempoVal !== "1.0") {
+          const speed = parseFloat(atempoVal)
+          if (speed >= 0.5 && speed <= 2.0) atempoChain = `,atempo=${speed}`
+          else if (speed > 2.0) atempoChain = `,atempo=2.0,atempo=${(speed/2.0).toFixed(2)}`
+          else if (speed < 0.5) atempoChain = `,atempo=0.5,atempo=${(speed/0.5).toFixed(2)}`
+        }
+        const vocalVol = vocalVolume !== undefined ? vocalVolume : 0.3
+
+        await new Promise((resolve, reject) => {
+          let cmd = ffmpeg(mainInput).setStartTime(clip.start).setDuration(clip.duration)
+          const bv = Math.round(bitrate * (0.95 + Math.random() * 0.10))
+          const baseOpts = [
+            "-movflags faststart", `-c:v ${codec}`, "-preset fast", `-crf ${crf}`,
+            "-map_metadata -1",
+            `-b:v ${bv}k`,
+            `-maxrate ${Math.round(bv * 1.4)}k`,
+            `-bufsize ${bv * 2}k`,
+          ]
+          let outputOpts
+          if (musicPath && fs.existsSync(musicPath)) {
+            // Mix voice (from video) + music with amix — vocalVol controls voice level
+            cmd = cmd.input(musicPath)
+            const fc = `[0:v]${vfString}[vout];[0:a]volume=${vocalVol}${atempoChain}[va];[1:a]volume=0.85[ma];[va][ma]amix=inputs=2:duration=first[aout]`
+            outputOpts = [...baseOpts, "-c:a aac", "-b:a 192k", `-filter_complex ${fc}`, "-map [vout]", "-map [aout]", "-shortest"]
+          } else {
+            const audioFilters = atempoChain ? [atempoChain.slice(1)] : []
+            outputOpts = [...baseOpts, `-vf ${vfString}`, "-c:a aac", "-b:a 192k"]
+            if (audioFilters.length > 0) outputOpts.push(`-af ${audioFilters.join(",")}`)
+          }
+          cmd.outputOptions(outputOpts).output(outputPath)
+            .on("end", resolve)
+            .on("error", (err, stdout, stderr) => { console.error("FFmpeg:", stderr?.slice(-500)); reject(err) })
+            .run()
+        })
+
+        try { await execAsync(`ffmpeg -i "${outputPath}" -ss 0.5 -vframes 1 -q:v 2 "${thumbPath}" -y 2>/dev/null`) } catch {}
+
+        const uniqueId = `${Date.now()}_${ci}_${Math.random().toString(36).slice(2)}`
+        const storageUrl = await uploadToStorage(outputPath, `clips/${uniqueId}.mp4`, "video/mp4")
+        const thumbStorageUrl = await uploadToStorage(thumbPath, `thumbs/${uniqueId}.jpg`, "image/jpeg")
+
+        let base64 = null
+        if (!storageUrl) {
+          console.warn(`Storage failed for clip ${ci}, fallback base64`)
+          base64 = `data:video/mp4;base64,${fs.readFileSync(outputPath).toString("base64")}`
+        }
+        const thumbBase64 = (!thumbStorageUrl && fs.existsSync(thumbPath))
+          ? `data:image/jpeg;base64,${fs.readFileSync(thumbPath).toString("base64")}` : null
+
+        clips.push({ name: clip.name || `Edit #${ci+1}`, base64, storageUrl, thumbnail: thumbStorageUrl || thumbBase64, duration: clip.duration })
+        updateJob(jobId, { progress: 48 + Math.floor((ci+1) / durations.length * 52) })
+      } finally {
+        try { if (fs.existsSync(outputPath)) fs.unlinkSync(outputPath) } catch {}
+        try { if (fs.existsSync(thumbPath))  fs.unlinkSync(thumbPath)  } catch {}
       }
-      let thumbBase64 = null
-      if (!thumbStorageUrl && fs.existsSync(thumbPath)) thumbBase64 = `data:image/jpeg;base64,${fs.readFileSync(thumbPath).toString("base64")}`
-
-      if (fs.existsSync(thumbPath)) fs.unlinkSync(thumbPath)
-      fs.unlinkSync(outputPath)
-
-      clips.push({ name: clip.name || `Edit #${ci+1}`, base64, storageUrl, thumbnail: thumbStorageUrl || thumbBase64, duration: clip.duration })
-      updateJob(jobId, { progress: 48 + Math.floor((ci+1) / durations.length * 52) })
     }
-
-    if (musicPath && fs.existsSync(musicPath)) fs.unlinkSync(musicPath)
-    for (const p of inputPaths) { if (fs.existsSync(p)) try { fs.unlinkSync(p) } catch {} }
-    if (concatPath && fs.existsSync(concatPath)) try { fs.unlinkSync(concatPath) } catch {}
-    if (stabPath && fs.existsSync(stabPath)) try { fs.unlinkSync(stabPath) } catch {}
 
     updateJob(jobId, { status:"done", progress:100, clips, completedAt: Date.now() })
 
   } catch (err) {
     console.error(err)
+    updateJob(jobId, { status:"error", progress:0, error:err.message, completedAt: Date.now() })
+  } finally {
+    if (musicPath && fs.existsSync(musicPath)) try { fs.unlinkSync(musicPath) } catch {}
     for (const p of inputPaths) { if (fs.existsSync(p)) try { fs.unlinkSync(p) } catch {} }
     if (concatPath && fs.existsSync(concatPath)) try { fs.unlinkSync(concatPath) } catch {}
     if (stabPath && fs.existsSync(stabPath)) try { fs.unlinkSync(stabPath) } catch {}
-    updateJob(jobId, { status:"error", progress:0, error:err.message, completedAt: Date.now() })
   }
 }
 
@@ -1412,13 +1413,16 @@ app.post("/retouch/inpaint", uploadLimiter, express.json({ limit: "50mb" }), asy
     const { image, mask } = req.body
     if (!image || !mask) return res.status(400).json({ error: "image ou masque manquant" })
 
-    const imgBuf = Buffer.from(image.replace(/^data:image\/\w+;base64,/, ""), "base64")
-    const mskBuf = Buffer.from(mask.replace(/^data:image\/\w+;base64,/, ""), "base64")
+    let imgBuf = Buffer.from(image.replace(/^data:image\/\w+;base64,/, ""), "base64")
+    let mskBuf = Buffer.from(mask.replace(/^data:image\/\w+;base64,/, ""), "base64")
 
     const img = await Jimp.read(imgBuf)
     const msk = await Jimp.read(mskBuf)
+    imgBuf = null; mskBuf = null
 
-    // Resolution originale — aucun resize
+    // Cap input size to limit peak RAM during pixel processing
+    if (img.getWidth() > 1920 || img.getHeight() > 1080) img.scaleToFit(1920, 1080)
+
     const W = img.getWidth(), H = img.getHeight()
     if (msk.getWidth() !== W || msk.getHeight() !== H) {
       msk.resize(W, H, Jimp.RESIZE_NEAREST_NEIGHBOR)
@@ -1601,10 +1605,12 @@ app.post('/retouch/remove-text', express.json({ limit: '50mb' }), async (req, re
   try {
     const { image, mask } = req.body
     if (!image || !mask) return res.status(400).json({ error: "image ou masque manquant" })
-    const imgBuf = Buffer.from(image.replace(/^data:image\/\w+;base64,/, ""), "base64")
-    const mskBuf = Buffer.from(mask.replace(/^data:image\/\w+;base64,/, ""), "base64")
+    let imgBuf = Buffer.from(image.replace(/^data:image\/\w+;base64,/, ""), "base64")
+    let mskBuf = Buffer.from(mask.replace(/^data:image\/\w+;base64,/, ""), "base64")
     const img = await Jimp.read(imgBuf)
     const msk = await Jimp.read(mskBuf)
+    imgBuf = null; mskBuf = null
+    if (img.getWidth() > 1920 || img.getHeight() > 1080) img.scaleToFit(1920, 1080)
     const W = img.getWidth(), H = img.getHeight()
     if (msk.getWidth() !== W || msk.getHeight() !== H) msk.resize(W, H, Jimp.RESIZE_NEAREST_NEIGHBOR)
     const px = img.bitmap.data, md = msk.bitmap.data
@@ -1646,5 +1652,7 @@ app.post('/retouch/remove-text', express.json({ limit: '50mb' }), async (req, re
   }
 })
 
+
+if (global.gc) setInterval(() => global.gc(), 60000)
 
 app.listen(PORT, () => console.log(`ClimbClip server running on port ${PORT}`))
