@@ -807,6 +807,7 @@ async function processVideo({ jobId, videoUrls, videoPaths, prompt, options, mus
   let concatPath = null
   let stabPath = null
 
+  console.log("options reçues:", options)
   try {
     updateJob(jobId, { status:"processing", progress:5 })
 
@@ -850,8 +851,9 @@ async function processVideo({ jobId, videoUrls, videoPaths, prompt, options, mus
       const targetFormat = format || "9:16"
       const capsuleScale = "1280:720"
       const formatFilter = getFormatFilter(targetFormat, capsuleScale)
-      const capsuleVfFilters = [formatFilter]
+      const capsuleVfFilters = []
       if (options?.includes("Miroir")) capsuleVfFilters.push("hflip")
+      capsuleVfFilters.push(formatFilter)
       const capsuleVf = capsuleVfFilters.join(",")
 
       for (let ci = 0; ci < durations.length; ci++) {
@@ -1020,9 +1022,8 @@ Règles timestamps: start+duration<=${Math.round(totalDuration)}, durées 10-30s
         atempoVal = clampedSpeed.toFixed(2)
       }
 
-      vfFilters.push(formatFilter)
-
       if (options?.includes("Miroir")) vfFilters.push("hflip")
+      vfFilters.push(formatFilter)
 
       if (effects?.autozoom?.enabled) {
         const intensity = Math.min(effects.autozoom.intensity||1.15, 1.3)
