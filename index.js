@@ -850,6 +850,9 @@ async function processVideo({ jobId, videoUrls, videoPaths, prompt, options, mus
       const targetFormat = format || "9:16"
       const capsuleScale = "1280:720"
       const formatFilter = getFormatFilter(targetFormat, capsuleScale)
+      const capsuleVfFilters = [formatFilter]
+      if (options?.includes("Miroir")) capsuleVfFilters.push("hflip")
+      const capsuleVf = capsuleVfFilters.join(",")
 
       for (let ci = 0; ci < durations.length; ci++) {
         const clip = durations[ci]
@@ -864,7 +867,7 @@ async function processVideo({ jobId, videoUrls, videoPaths, prompt, options, mus
               "-c:v libx264",
               "-preset slow",
               "-crf 18",
-              `-vf ${formatFilter}`,
+              `-vf ${capsuleVf}`,
               "-map_metadata -1",
               `-b:v ${Math.round(3000 * (0.95 + Math.random() * 0.10))}k`,
               "-threads 2",
