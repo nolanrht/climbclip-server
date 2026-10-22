@@ -776,35 +776,28 @@ async function uploadToStorage(filePath, storagePath, contentType) {
 // ─── GÉNÉRATION CAPSULES (bypass duplicate detection) ──────────────────────
 
 function buildCapsuleTimestamps(totalDuration, count) {
-  const MIN_GAP = 2      // min seconds between consecutive start times
-  const MIN_DUR = 3      // min clip duration in seconds
-  // Each capsule occupies an equal slot of the total video
-  const slotSize = totalDuration / count
-  // Clip duration: 75% of the slot, clamped between 5s and 60s
-  const clipDuration = Math.min(60, Math.max(5, slotSize * 0.75))
-
   const capsules = []
+  const usedStarts = new Set()
+  let cursor = 0
+
   for (let i = 0; i < count; i++) {
-    // Start 15% into each slot so capsules are truly from different parts of the video
-    const start = parseFloat((i * slotSize + slotSize * 0.15).toFixed(2))
-    const available = totalDuration - start - 0.1
-    const duration = parseFloat(Math.min(clipDuration, Math.max(MIN_DUR, available)).toFixed(2))
-    if (start < totalDuration - MIN_DUR) {
-      capsules.push({ start, duration, name: `Capsule #${i+1}` })
+    const duration = parseFloat((5.0 + Math.random() * 10.0).toFixed(3))
+    if (cursor + duration > totalDuration) break
+
+    let start = parseFloat(cursor.toFixed(3))
+    while (usedStarts.has(start)) {
+      start = parseFloat((start + 0.001).toFixed(3))
     }
+    if (start + duration > totalDuration) break
+
+    usedStarts.add(start)
+    capsules.push({ start, duration, name: `Capsule #${i+1}` })
+
+    const gap = parseFloat((0.5 + Math.random() * 2.5).toFixed(3))
+    cursor = parseFloat((start + duration + gap).toFixed(3))
   }
 
-  // Enforce minimum gap between consecutive start times
-  for (let i = 1; i < capsules.length; i++) {
-    const minStart = parseFloat((capsules[i-1].start + MIN_GAP).toFixed(2))
-    if (capsules[i].start < minStart) {
-      capsules[i].start = minStart
-      const available = totalDuration - minStart - 0.1
-      capsules[i].duration = parseFloat(Math.min(clipDuration, Math.max(MIN_DUR, available)).toFixed(2))
-    }
-  }
-
-  return capsules.filter(c => c.duration >= MIN_DUR && c.start + c.duration <= totalDuration + 0.5)
+  return capsules
 }
 
 // ─── MAIN PROCESS ──────────────────────────────────────────────────────────
@@ -1027,6 +1020,8 @@ Règles timestamps: start+duration<=${Math.round(totalDuration)}, durées 10-30s
       }
 
       vfFilters.push(formatFilter)
+
+      if (options?.includes("Miroir")) vfFilters.push("hflip")
 
       if (effects?.autozoom?.enabled) {
         const intensity = Math.min(effects.autozoom.intensity||1.15, 1.3)
