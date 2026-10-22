@@ -777,24 +777,22 @@ async function uploadToStorage(filePath, storagePath, contentType) {
 
 function buildCapsuleTimestamps(totalDuration, count) {
   const capsules = []
-  const usedStarts = new Set()
   let cursor = 0
 
   for (let i = 0; i < count; i++) {
     const duration = parseFloat((5.0 + Math.random() * 10.0).toFixed(3))
-    if (cursor + duration > totalDuration) break
 
-    let start = parseFloat(cursor.toFixed(3))
-    while (usedStarts.has(start)) {
-      start = parseFloat((start + 0.001).toFixed(3))
-    }
-    if (start + duration > totalDuration) break
+    // Wrap around if there is not enough room from the current cursor
+    if (cursor + duration > totalDuration) cursor = 0
 
-    usedStarts.add(start)
-    capsules.push({ start, duration, name: `Capsule #${i+1}` })
+    // Clamp in case the video is shorter than the minimum capsule duration
+    const clampedDuration = parseFloat(Math.min(duration, totalDuration).toFixed(3))
+    const start = parseFloat(cursor.toFixed(3))
+
+    capsules.push({ start, duration: clampedDuration, name: `Capsule #${i+1}` })
 
     const gap = parseFloat((0.5 + Math.random() * 2.5).toFixed(3))
-    cursor = parseFloat((start + duration + gap).toFixed(3))
+    cursor = parseFloat((start + clampedDuration + gap).toFixed(3))
   }
 
   return capsules
