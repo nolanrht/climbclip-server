@@ -1105,8 +1105,8 @@ Règles timestamps: start+duration<=${Math.round(totalDuration)}, durées 10-30s
         if (gradeFilter) vfFilters.push(gradeFilter)
         const visFilter = getVisualFilterFFmpeg(visualFilter)
         if (visFilter) vfFilters.push(visFilter)
-        vfFilters.push(`noise=alls=4:allf=t+u`)
-        vfFilters.push(`vignette=PI/5`)
+        if (!visualFilter) vfFilters.push(`noise=alls=4:allf=t+u`)
+        if (!visualFilter) vfFilters.push(`vignette=PI/5`)
 
         const transFilter = buildTransitionFilter(transition, clip.duration)
         if (transFilter) vfFilters.push(transFilter)
@@ -1140,7 +1140,7 @@ Règles timestamps: start+duration<=${Math.round(totalDuration)}, durées 10-30s
           let cmd = ffmpeg(mainInput).setStartTime(clip.start).setDuration(clip.duration)
           const bv = Math.round(bitrate * (0.95 + Math.random() * 0.10))
           const baseOpts = [
-            "-movflags faststart", `-c:v ${codec}`, "-preset fast", `-crf ${crf}`,
+            "-movflags faststart", `-c:v ${codec}`, visualFilter ? "-preset ultrafast" : "-preset fast", `-crf ${crf}`,
             "-map_metadata -1",
             `-b:v ${bv}k`,
             `-maxrate ${Math.round(bv * 1.4)}k`,
