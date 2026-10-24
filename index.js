@@ -335,10 +335,13 @@ async function processVideo({ jobId, videoUrls, videoPaths, prompt, options, mus
         const sceneContext = sceneCuts.length > 0 ? `Scènes à: ${sceneCuts.slice(0, 10).map(t => t.toFixed(1)).join(", ")}s.` : ""
         const aiResponse = await anthropic.messages.create({
           model: "claude-sonnet-4-5", max_tokens: 1000,
-          messages: [{ role: "user", content: `Éditeur vidéo expert. Vidéo: ${Math.round(totalDuration)}s. Prompt: "${prompt || "edits dynamiques"}". ${beatContext} ${sceneContext} JSON brut: [{"start":0,"duration":15,"name":"Edit #1"}]. Règles: start+duration<=${Math.round(totalDuration)}, durées 10-30s.` }]
+          messages: [
+            { role: "user", content: `Tu es un éditeur vidéo. Vidéo: ${Math.round(totalDuration)}s. Prompt: "${prompt || "edits dynamiques"}". ${beatContext} ${sceneContext} Réponds UNIQUEMENT avec un tableau JSON valide, rien d'autre. Règles: start+duration<=${Math.round(totalDuration)}, durées 10-30s.` },
+            { role: "assistant", content: "[" }
+          ]
         })
         const aiText = aiResponse.content[0].type === "text" ? aiResponse.content[0].text : ""
-        const cleanedAiText = aiText.replace(/```json\n?/g, "").replace(/```\n?/g, "").replace(/^#[^\n]*\n?/gm, "").trim()
+        const cleanedAiText = ("[" + aiText).replace(/```json\n?/g, "").replace(/```\n?/g, "").replace(/^#[^\n]*\n?/gm, "").replace(/^\[+/, "[").trim()
         const parsed = JSON.parse(cleanedAiText)
         if (Array.isArray(parsed) && parsed.length > 0) {
           durations = parsed.map((d, i) => ({ start: Math.max(0, Math.min(d.start, totalDuration - (d.duration || 15))), duration: Math.min(d.duration || 15, totalDuration), name: d.name || `Edit #${i + 1}` }))
