@@ -260,7 +260,12 @@ async function processVideo({ jobId, videoUrls, videoPaths, prompt, options, mus
       await new Promise((resolve, reject) => { writer.on("finish", resolve); writer.on("error", reject) })
       inputPaths.push(inputPath)
     }
-    for (const p of (videoPaths || [])) { if (fs.existsSync(p)) inputPaths.push(p) }
+    for (const p of (videoPaths || [])) {
+      if (!p || p === "undefined") { jobs[jobId].error = "Vidéo introuvable — réimporte le fichier"; throw new Error("invalid path: " + p) }
+      if (fs.existsSync(p)) inputPaths.push(p)
+      else { jobs[jobId].error = "Fichier vidéo perdu (serveur redémarré) — réimporte le fichier"; throw new Error("file not found: " + p) }
+    }
+    if (inputPaths.length === 0) { jobs[jobId].error = "Aucun fichier vidéo valide"; throw new Error("no valid input") }
 
     jobs[jobId].progress = 20
 
