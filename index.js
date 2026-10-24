@@ -129,6 +129,14 @@ function getColorGradeFilter(grade) {
 
 function getVisualFilterFFmpeg(filter) {
   const filters = {
+    "clarendon": "eq=saturation=1.35:contrast=1.2:brightness=0.08",
+    "gingham":   "eq=brightness=0.05:saturation=0.9:contrast=0.95,hue=h=-10",
+    "juno":      "eq=saturation=1.4:contrast=1.1:brightness=0.05,hue=h=5",
+    "lark":      "eq=contrast=0.9:brightness=0.12:saturation=0.85",
+    "ludwig":    "eq=saturation=1.05:contrast=1.08:brightness=0.06,curves=r='0/0.03 1/0.97':b='0/0 1/0.92'",
+    "moon":      "hue=s=0,eq=contrast=1.18:brightness=0.08",
+    "reyes":     "curves=r='0/0.04 1/0.96':g='0/0.02 1/0.94':b='0/0 1/0.88',eq=brightness=0.1:contrast=0.85:saturation=0.75",
+    "valencia":  "curves=r='0/0.02 1/0.98':b='0/0 1/0.9',eq=contrast=1.08:brightness=0.04:saturation=1.1",
     "chaud":    "curves=r='0/0.06 0.5/0.6 1/1':g='0/0 0.5/0.5 1/0.94':b='0/0 0.5/0.42 1/0.85',eq=saturation=1.15:brightness=0.02",
     "froid":    "curves=r='0/0 0.5/0.42 1/0.88':g='0/0 0.5/0.5 1/0.97':b='0/0.05 0.5/0.58 1/1',eq=saturation=1.08",
     "contraste":"eq=contrast=1.25:brightness=-0.02:saturation=1.1,unsharp=3:3:0.6:3:3:0.4",
@@ -330,7 +338,8 @@ async function processVideo({ jobId, videoUrls, videoPaths, prompt, options, mus
           messages: [{ role: "user", content: `Éditeur vidéo expert. Vidéo: ${Math.round(totalDuration)}s. Prompt: "${prompt || "edits dynamiques"}". ${beatContext} ${sceneContext} JSON brut: [{"start":0,"duration":15,"name":"Edit #1"}]. Règles: start+duration<=${Math.round(totalDuration)}, durées 10-30s.` }]
         })
         const aiText = aiResponse.content[0].type === "text" ? aiResponse.content[0].text : ""
-        const parsed = JSON.parse(aiText.replace(/```json\n?/g, "").replace(/```\n?/g, "").trim())
+        const cleanedAiText = aiText.replace(/```json\n?/g, "").replace(/```\n?/g, "").replace(/^#[^\n]*\n?/gm, "").trim()
+        const parsed = JSON.parse(cleanedAiText)
         if (Array.isArray(parsed) && parsed.length > 0) {
           durations = parsed.map((d, i) => ({ start: Math.max(0, Math.min(d.start, totalDuration - (d.duration || 15))), duration: Math.min(d.duration || 15, totalDuration), name: d.name || `Edit #${i + 1}` }))
         }
@@ -436,10 +445,6 @@ async function processVideo({ jobId, videoUrls, videoPaths, prompt, options, mus
           `-crf ${qualityCrf}`,
           `-vf ${vfString}`,
           "-map_metadata -1",
-          `-metadata make="${metadata.make}"`,
-          `-metadata model="${metadata.model}"`,
-          `-metadata software="${metadata.software}"`,
-          `-metadata creation_time="${metadata.date}"`,
           `-b:v ${Math.floor(2500 + Math.random() * 500)}k`,
           `-maxrate ${Math.floor(3500 + Math.random() * 500)}k`,
           `-bufsize 4000k`,
