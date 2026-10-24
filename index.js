@@ -856,8 +856,7 @@ async function processVideo({ jobId, videoUrls, videoPaths, prompt, options, mus
       const count = capsulesCount || 4
       const durations = buildCapsuleTimestamps(totalDuration, count)
       const targetFormat = format || "9:16"
-      // Miroir: force 720p to cap memory; without miroir use full format dimensions
-      const capsuleFormatFilter = getFormatFilter(targetFormat, isMiroir ? "1280:720" : null)
+      const capsuleFormatFilter = getFormatFilter(targetFormat)
       const capsuleVfFilters = []
       if (isMiroir) capsuleVfFilters.push("hflip")
       capsuleVfFilters.push(capsuleFormatFilter)
@@ -878,7 +877,7 @@ async function processVideo({ jobId, videoUrls, videoPaths, prompt, options, mus
               .outputOptions([
                 "-movflags faststart",
                 "-c:v libx264",
-                isMiroir ? "-preset ultrafast" : "-preset slow",
+                "-preset fast",
                 "-crf 18",
                 `-vf ${capsuleVf}`,
                 "-map_metadata -1",
@@ -925,47 +924,37 @@ async function processVideo({ jobId, videoUrls, videoPaths, prompt, options, mus
       return
     }
 
-    // ─── MODE MIROIR SEUL : vidéo entière retournée, 1 clip ──────────────────
+    // ─── MODE MIROIR SEUL : vidéo entière retournée horizontalement, 1 clip ─────
     if (isMirrorOnly) {
       updateJob(jobId, { progress:40, message:"Miroir en cours... 🔄" })
-      const targetFormat = format || "9:16"
-      const mirrorOnlyScales = { "9:16":"720:1280", "16:9":"1280:720", "1:1":"720:720", "4:5":"720:900" }
-      const mirrorScale = mirrorOnlyScales[targetFormat] || "720:1280"
-      const mirrorFmtFilter = getFormatFilter(targetFormat, mirrorScale)
-      const vfStr = `${mirrorFmtFilter},format=yuv420p`
-      const tempFlipPath = path.join(tmpDir, `premirror_${Date.now()}.mp4`)
-      const outputPath  = path.join(tmpDir, `mirror_${Date.now()}.mp4`)
-      const thumbPath   = path.join(tmpDir, `thumb_mirror_${Date.now()}.jpg`)
+      const outputPath = path.join(tmpDir, `mirror_${Date.now()}.mp4`)
+      const thumbPath  = path.join(tmpDir, `thumb_mirror_${Date.now()}.jpg`)
       try {
-        // Pass 1: scale + format at ultrafast
         await new Promise((resolve, reject) => {
           ffmpeg(mainInput)
-            .outputOptions(["-movflags faststart", "-c:v libx264", "-preset ultrafast", "-crf 22", `-vf ${vfStr}`, "-c:a aac", "-b:a 128k", "-map_metadata -1"])
-            .output(tempFlipPath)
-            .on("end", resolve)
-            .on("error", (err, _so, se) => { console.error(`FFmpeg mirror-only pass1: ${err.message}\n${se}`); reject(err) })
-            .run()
-        })
-        updateJob(jobId, { progress:70 })
-        // Pass 2: hflip only, audio copied — minimal memory usage
-        await new Promise((resolve, reject) => {
-          ffmpeg(tempFlipPath)
-            .outputOptions(["-movflags faststart", "-c:v libx264", "-preset ultrafast", "-crf 22", "-vf hflip,format=yuv420p", "-c:a copy", "-map_metadata -1"])
+            .outputOptions([
+              "-movflags faststart",
+              "-c:v libx264", "-preset fast", "-crf 22",
+              "-vf hflip,format=yuv420p",
+              "-c:a aac", "-b:a 128k",
+              "-map_metadata -1",
+            ])
             .output(outputPath)
             .on("end", resolve)
-            .on("error", (err, _so, se) => { console.error(`FFmpeg mirror-only pass2: ${err.message}\n${se}`); reject(err) })
+            .on("error", (err, _so, se) => { console.error(`FFmpeg mirror-only: ${err.message}\n${se}`); reject(err) })
             .run()
         })
         updateJob(jobId, { progress:90 })
         try { await execAsync(`ffmpeg -i "${outputPath}" -ss 2 -vframes 1 -q:v 5 "${thumbPath}" -y 2>/dev/null`) } catch {}
-        const uniqueId    = `mirror_${Date.now()}`
-        const storageUrl  = await uploadToStorage(outputPath, `clips/${uniqueId}.mp4`, "video/mp4")
+        const uniqueId        = `mirror_${Date.now()}`
+        const storageUrl      = await uploadToStorage(outputPath, `clips/${uniqueId}.mp4`, "video/mp4")
         const thumbStorageUrl = await uploadToStorage(thumbPath, `thumbs/${uniqueId}.jpg`, "image/jpeg")
-        const base64      = !storageUrl && fs.existsSync(outputPath) ? `data:video/mp4;base64,${fs.readFileSync(outputPath).toString("base64")}` : null
-        const thumbBase64 = !thumbStorageUrl && fs.existsSync(thumbPath) ? `data:image/jpeg;base64,${fs.readFileSync(thumbPath).toString("base64")}` : null
+        const base64      = !storageUrl      && fs.existsSync(outputPath) ? `data:video/mp4;base64,${fs.readFileSync(outputPath).toString("base64")}` : null
+        const thumbBase64 = !thumbStorageUrl && fs.existsSync(thumbPath)  ? `data:image/jpeg;base64,${fs.readFileSync(thumbPath).toString("base64")}` : null
         clips.push({ name:"Miroir", base64, storageUrl, thumbnail: thumbStorageUrl || thumbBase64, duration: totalDuration })
       } finally {
-        for (const p of [outputPath, tempFlipPath, thumbPath]) try { if (fs.existsSync(p)) fs.unlinkSync(p) } catch {}
+        try { if (fs.existsSync(outputPath)) fs.unlinkSync(outputPath) } catch {}
+        try { if (fs.existsSync(thumbPath))  fs.unlinkSync(thumbPath)  } catch {}
       }
       for (const p of inputPaths) try { if (fs.existsSync(p)) fs.unlinkSync(p) } catch {}
       if (concatPath && fs.existsSync(concatPath)) try { fs.unlinkSync(concatPath) } catch {}
@@ -1071,15 +1060,11 @@ Règles timestamps: start+duration<=${Math.round(totalDuration)}, durées 10-30s
 
     const targetFormat = format || "9:16"
     const { scale, crf, bitrate, codec } = getQualitySettings(exportQuality, exportCodec)
-    // Miroir: cap to 720p to cut encoder memory in half
-    const mirrorScales = { "9:16":"720:1280", "16:9":"1280:720", "1:1":"720:720", "4:5":"720:900" }
-    const effectiveScale = isMiroir ? (mirrorScales[targetFormat] || "720:1280") : scale
-    const formatFilter = getFormatFilter(targetFormat, effectiveScale, subjectPos?.x_pct, subjectPos?.y_pct)
+    const formatFilter = getFormatFilter(targetFormat, scale, subjectPos?.x_pct, subjectPos?.y_pct)
     for (let ci = 0; ci < durations.length; ci++) {
       const clip = durations[ci]
       const outputPath = path.join(tmpDir, `clip_${ci}_${Date.now()}.mp4`)
-      const thumbPath = path.join(tmpDir, `thumb_${ci}_${Date.now()}.jpg`)
-      const tempFlipPath = isMiroir ? path.join(tmpDir, `preflip_${ci}_${Date.now()}.mp4`) : null
+      const thumbPath  = path.join(tmpDir, `thumb_${ci}_${Date.now()}.jpg`)
       try {
         const vfFilters = []
         let atempoVal = "1.0"
@@ -1091,7 +1076,7 @@ Règles timestamps: start+duration<=${Math.round(totalDuration)}, durées 10-30s
           atempoVal = clampedSpeed.toFixed(2)
         }
 
-        // hflip is NOT added here — when Miroir is active it runs as a separate second pass
+        if (isMiroir) vfFilters.push("hflip")
         vfFilters.push(formatFilter)
 
         if (effects?.autozoom?.enabled) {
@@ -1101,11 +1086,8 @@ Règles timestamps: start+duration<=${Math.round(totalDuration)}, durées 10-30s
 
         const gradeFilter = getColorGradeFilter(colorGrade)
         if (gradeFilter) vfFilters.push(gradeFilter)
-        // Skip memory-heavy noise and vignette when Miroir is active
-        if (!isMiroir) {
-          vfFilters.push(`noise=alls=4:allf=t+u`)
-          vfFilters.push(`vignette=PI/5`)
-        }
+        vfFilters.push(`noise=alls=4:allf=t+u`)
+        vfFilters.push(`vignette=PI/5`)
 
         const transFilter = buildTransitionFilter(transition, clip.duration)
         if (transFilter) vfFilters.push(transFilter)
@@ -1123,7 +1105,7 @@ Règles timestamps: start+duration<=${Math.round(totalDuration)}, durées 10-30s
         vfFilters.push("format=yuv420p")
 
         const vfString = vfFilters.join(",")
-        if (isMiroir) console.log(`[clip ${ci}] Miroir pass1 vf="${vfString}"`)
+        if (isMiroir) console.log(`[clip ${ci}] vfString with Miroir: ${vfString}`)
 
         // Build atempo chain for speed-ramped audio
         let atempoChain = ""
@@ -1135,14 +1117,11 @@ Règles timestamps: start+duration<=${Math.round(totalDuration)}, durées 10-30s
         }
         const vocalVol = vocalVolume !== undefined ? vocalVolume : 0.3
 
-        // Pass 1: render all filters (no hflip); when Miroir write to tempFlipPath
-        const pass1Output = isMiroir ? tempFlipPath : outputPath
         await new Promise((resolve, reject) => {
           let cmd = ffmpeg(mainInput).setStartTime(clip.start).setDuration(clip.duration)
           const bv = Math.round(bitrate * (0.95 + Math.random() * 0.10))
-          const preset = isMiroir ? "ultrafast" : "fast"
           const baseOpts = [
-            "-movflags faststart", `-c:v ${codec}`, `-preset ${preset}`, `-crf ${crf}`,
+            "-movflags faststart", `-c:v ${codec}`, "-preset fast", `-crf ${crf}`,
             "-map_metadata -1",
             `-b:v ${bv}k`,
             `-maxrate ${Math.round(bv * 1.4)}k`,
@@ -1159,31 +1138,11 @@ Règles timestamps: start+duration<=${Math.round(totalDuration)}, durées 10-30s
             outputOpts = [...baseOpts, `-vf ${vfString}`, "-c:a aac", "-b:a 192k"]
             if (audioFilters.length > 0) outputOpts.push(`-af ${audioFilters.join(",")}`)
           }
-          cmd.outputOptions(outputOpts).output(pass1Output)
+          cmd.outputOptions(outputOpts).output(outputPath)
             .on("end", resolve)
-            .on("error", (err, stdout, stderr) => { console.error(`FFmpeg pass1 (Miroir=${isMiroir}) vf="${vfString}" err=${err.message}\nstderr:${stderr}`); reject(err) })
+            .on("error", (err, stdout, stderr) => { console.error(`FFmpeg clip${isMiroir?" (Miroir)":""} vf="${vfString}" err=${err.message}\nstderr:${stderr}`); reject(err) })
             .run()
         })
-
-        // Pass 2 (Miroir only): apply hflip on the rendered clip, audio copied without re-encode
-        if (isMiroir) {
-          await new Promise((resolve, reject) => {
-            ffmpeg(tempFlipPath)
-              .outputOptions([
-                "-movflags faststart",
-                `-c:v ${codec}`,
-                "-preset ultrafast",
-                `-crf ${crf}`,
-                "-vf hflip,format=yuv420p",
-                "-c:a copy",
-                "-map_metadata -1",
-              ])
-              .output(outputPath)
-              .on("end", resolve)
-              .on("error", (err, stdout, stderr) => { console.error(`FFmpeg hflip pass2 err=${err.message}\nstderr:${stderr}`); reject(err) })
-              .run()
-          })
-        }
 
         try { await execAsync(`ffmpeg -i "${outputPath}" -ss 0.5 -vframes 1 -q:v 2 "${thumbPath}" -y 2>/dev/null`) } catch {}
 
@@ -1204,7 +1163,6 @@ Règles timestamps: start+duration<=${Math.round(totalDuration)}, durées 10-30s
       } finally {
         try { if (fs.existsSync(outputPath)) fs.unlinkSync(outputPath) } catch {}
         try { if (fs.existsSync(thumbPath))  fs.unlinkSync(thumbPath)  } catch {}
-        if (tempFlipPath) try { if (fs.existsSync(tempFlipPath)) fs.unlinkSync(tempFlipPath) } catch {}
       }
     }
 
