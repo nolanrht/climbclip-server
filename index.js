@@ -812,7 +812,9 @@ async function processVideo({ jobId, videoUrls, videoPaths, prompt, options, mus
   let stabPath = null
 
   const isMiroir = options?.includes("Miroir")
-  console.log("options reçues:", options, "isMiroir:", isMiroir)
+  // Mirror alone = Miroir is the only active option (no Beat sync, no Sous-titres, etc.)
+  const isMirrorOnly = isMiroir && !isCapsule && options.filter(o => o !== "Miroir").length === 0
+  console.log("options reçues:", options, "isMiroir:", isMiroir, "isMirrorOnly:", isMirrorOnly)
   try {
     updateJob(jobId, { status:"processing", progress:5 })
 
@@ -923,6 +925,54 @@ async function processVideo({ jobId, videoUrls, videoPaths, prompt, options, mus
       return
     }
 
+    // ─── MODE MIROIR SEUL : vidéo entière retournée, 1 clip ──────────────────
+    if (isMirrorOnly) {
+      updateJob(jobId, { progress:40, message:"Miroir en cours... 🔄" })
+      const targetFormat = format || "9:16"
+      const mirrorOnlyScales = { "9:16":"720:1280", "16:9":"1280:720", "1:1":"720:720", "4:5":"720:900" }
+      const mirrorScale = mirrorOnlyScales[targetFormat] || "720:1280"
+      const mirrorFmtFilter = getFormatFilter(targetFormat, mirrorScale)
+      const vfStr = `${mirrorFmtFilter},format=yuv420p`
+      const tempFlipPath = path.join(tmpDir, `premirror_${Date.now()}.mp4`)
+      const outputPath  = path.join(tmpDir, `mirror_${Date.now()}.mp4`)
+      const thumbPath   = path.join(tmpDir, `thumb_mirror_${Date.now()}.jpg`)
+      try {
+        // Pass 1: scale + format at ultrafast
+        await new Promise((resolve, reject) => {
+          ffmpeg(mainInput)
+            .outputOptions(["-movflags faststart", "-c:v libx264", "-preset ultrafast", "-crf 22", `-vf ${vfStr}`, "-c:a aac", "-b:a 128k", "-map_metadata -1"])
+            .output(tempFlipPath)
+            .on("end", resolve)
+            .on("error", (err, _so, se) => { console.error(`FFmpeg mirror-only pass1: ${err.message}\n${se}`); reject(err) })
+            .run()
+        })
+        updateJob(jobId, { progress:70 })
+        // Pass 2: hflip only, audio copied — minimal memory usage
+        await new Promise((resolve, reject) => {
+          ffmpeg(tempFlipPath)
+            .outputOptions(["-movflags faststart", "-c:v libx264", "-preset ultrafast", "-crf 22", "-vf hflip,format=yuv420p", "-c:a copy", "-map_metadata -1"])
+            .output(outputPath)
+            .on("end", resolve)
+            .on("error", (err, _so, se) => { console.error(`FFmpeg mirror-only pass2: ${err.message}\n${se}`); reject(err) })
+            .run()
+        })
+        updateJob(jobId, { progress:90 })
+        try { await execAsync(`ffmpeg -i "${outputPath}" -ss 2 -vframes 1 -q:v 5 "${thumbPath}" -y 2>/dev/null`) } catch {}
+        const uniqueId    = `mirror_${Date.now()}`
+        const storageUrl  = await uploadToStorage(outputPath, `clips/${uniqueId}.mp4`, "video/mp4")
+        const thumbStorageUrl = await uploadToStorage(thumbPath, `thumbs/${uniqueId}.jpg`, "image/jpeg")
+        const base64      = !storageUrl && fs.existsSync(outputPath) ? `data:video/mp4;base64,${fs.readFileSync(outputPath).toString("base64")}` : null
+        const thumbBase64 = !thumbStorageUrl && fs.existsSync(thumbPath) ? `data:image/jpeg;base64,${fs.readFileSync(thumbPath).toString("base64")}` : null
+        clips.push({ name:"Miroir", base64, storageUrl, thumbnail: thumbStorageUrl || thumbBase64, duration: totalDuration })
+      } finally {
+        for (const p of [outputPath, tempFlipPath, thumbPath]) try { if (fs.existsSync(p)) fs.unlinkSync(p) } catch {}
+      }
+      for (const p of inputPaths) try { if (fs.existsSync(p)) fs.unlinkSync(p) } catch {}
+      if (concatPath && fs.existsSync(concatPath)) try { fs.unlinkSync(concatPath) } catch {}
+      updateJob(jobId, { status:"done", progress:100, clips, completedAt: Date.now() })
+      return
+    }
+
     // ─── MODE NORMAL ────────────────────────────────────────────────────────
     updateJob(jobId, { progress:20, message:"Analyse du contenu... 🔍" })
     const keyFrames = await extractKeyFrames(mainInput, 4)
@@ -1009,6 +1059,13 @@ Règles timestamps: start+duration<=${Math.round(totalDuration)}, durées 10-30s
     }
 
     if (!durations) durations = [{ start:0, duration:15, name:"Edit #1" },{ start:10, duration:20, name:"Edit #2" },{ start:25, duration:15, name:"Edit #3" }]
+
+    // Respect clip count from prompt ("3 clips", "1 clip", "2 edits"…)
+    const clipCountMatch = (prompt || "").match(/\b(\d+)\s*(?:clips?|edits?|extraits?)\b/i)
+    if (clipCountMatch) {
+      const n = Math.max(1, parseInt(clipCountMatch[1], 10))
+      if (n < durations.length) durations = durations.slice(0, n)
+    }
 
     updateJob(jobId, { progress:48, message:"Rendu des clips... ✨" })
 
