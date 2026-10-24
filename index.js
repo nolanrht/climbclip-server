@@ -853,12 +853,14 @@ async function processVideo({ jobId, videoUrls, videoPaths, prompt, options, mus
       const count = capsulesCount || 4
       const durations = buildCapsuleTimestamps(totalDuration, count)
       const targetFormat = format || "9:16"
-      const capsuleScale = "1280:720"
-      const formatFilter = getFormatFilter(targetFormat, capsuleScale)
+      const formatFilter = getFormatFilter(targetFormat)
       const capsuleVfFilters = []
       if (options?.includes("Miroir")) capsuleVfFilters.push("hflip")
       capsuleVfFilters.push(formatFilter)
+      capsuleVfFilters.push("format=yuv420p")
       const capsuleVf = capsuleVfFilters.join(",")
+      console.log(`[capsule] Miroir=${options?.includes("Miroir")} vf="${capsuleVf}"`)
+
 
       for (let ci = 0; ci < durations.length; ci++) {
         const clip = durations[ci]
@@ -882,7 +884,7 @@ async function processVideo({ jobId, videoUrls, videoPaths, prompt, options, mus
               ])
               .output(outputPath)
               .on("end", resolve)
-              .on("error", (err, stdout, stderr) => { console.error("FFmpeg capsule:", stderr?.slice(-300)); reject(err) })
+              .on("error", (err, stdout, stderr) => { console.error(`FFmpeg capsule (Miroir=${options?.includes("Miroir")}) vf="${capsuleVf}" err=${err.message}\nstderr:${stderr}`); reject(err) })
               .run()
           })
 
@@ -1052,8 +1054,10 @@ Règles timestamps: start+duration<=${Math.round(totalDuration)}, durées 10-30s
 
         if (watermark) vfFilters.push(buildWatermarkFilter(targetFormat))
         if (addIntroOutro) vfFilters.push(buildIntroOutroFilter(clip.duration, targetFormat))
+        vfFilters.push("format=yuv420p")
 
         const vfString = vfFilters.join(",")
+        if (options?.includes("Miroir")) console.log(`[clip ${ci}] vfString with Miroir: ${vfString}`)
 
         // Build atempo chain for speed-ramped audio
         let atempoChain = ""
@@ -1088,7 +1092,7 @@ Règles timestamps: start+duration<=${Math.round(totalDuration)}, durées 10-30s
           }
           cmd.outputOptions(outputOpts).output(outputPath)
             .on("end", resolve)
-            .on("error", (err, stdout, stderr) => { console.error("FFmpeg:", stderr?.slice(-500)); reject(err) })
+            .on("error", (err, stdout, stderr) => { console.error(`FFmpeg clip (Miroir=${options?.includes("Miroir")}) vf="${vfString}" err=${err.message}\nstderr:${stderr}`); reject(err) })
             .run()
         })
 
