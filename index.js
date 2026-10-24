@@ -498,3 +498,4 @@ async function processVideo({ jobId, videoUrls, videoPaths, prompt, options, mus
 }
 
 app.listen(PORT, () => console.log(`ClimbClip server running on port ${PORT}`))
+// cache bust Sun Oct 25 00:54:07 CEST 2026
