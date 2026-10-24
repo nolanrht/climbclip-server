@@ -32,6 +32,12 @@ app.post("/upload", upload.single("file"), async (req, res) => {
   res.json({ path: req.file.path })
 })
 
+app.post("/check-file", (req, res) => {
+  const { path: filePath } = req.body
+  if (!filePath || filePath === "undefined") return res.json({ exists: false })
+  res.json({ exists: fs.existsSync(filePath) })
+})
+
 app.post("/download", async (req, res) => {
   const { url } = req.body
   if (!url) return res.status(400).json({ error: "URL requise" })
