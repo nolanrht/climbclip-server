@@ -516,6 +516,7 @@ app.post("/generate", generateLimiter, async (req, res) => {
     watermark:      !!req.body.watermark,
     isCapsule:      !!req.body.isCapsule,
     customTimestamps: Array.isArray(req.body.customTimestamps) ? req.body.customTimestamps.slice(0, 20) : null,
+    visualFilter: typeof req.body.visualFilter === "string" ? req.body.visualFilter.slice(0, 30) : null,
   }
 
   const jobId = `job_${Date.now()}`
@@ -661,6 +662,20 @@ function getColorGradeFilter(grade) {
   return grades[grade] || null
 }
 
+function getVisualFilterFFmpeg(filterName) {
+  const filters = {
+    "vivid":    "eq=saturation=2.0:contrast=1.15:brightness=0.03",
+    "vintage":  "curves=r='0/0.05 0.5/0.58 1/0.92':g='0/0.02 0.5/0.50 1/0.85':b='0/0 0.5/0.40 1/0.75'",
+    "sepia":    "colorchannelmixer=.393:.769:.189:0:.349:.686:.168:0:.272:.534:.131:0",
+    "bw":       "hue=s=0,eq=contrast=1.6:brightness=0.04",
+    "negative": "negate",
+    "hdr":      "eq=saturation=1.4:contrast=1.3:gamma=0.8,unsharp=5:5:0.6:3:3:0.2",
+    "glitch":   "rgbashift=rh=6:rv=-4:gh=0:gv=0:bh=-6:bv=4",
+    "vhs":      "eq=saturation=0.85:contrast=1.1,curves=r='0/0 0.5/0.55 1/1':b='0/0.05 0.5/0.52 1/0.97'",
+  }
+  return filters[filterName] || null
+}
+
 
 async function detectSceneCuts(inputPath) {
   try {
@@ -804,7 +819,7 @@ function buildCapsuleTimestamps(totalDuration, count) {
 
 // ─── MAIN PROCESS ──────────────────────────────────────────────────────────
 
-async function processVideo({ jobId, videoUrls, videoPaths, prompt, options, musicUrl, format, zoomIntensity, speedIntensity, addIntroOutro, customTimestamps, colorGrade, transition, textOverlay, textEffect, stabilize, vocalVolume, watermark, exportQuality, exportCodec, subtitleStyle, capsulesCount, isCapsule }) {
+async function processVideo({ jobId, videoUrls, videoPaths, prompt, options, musicUrl, format, zoomIntensity, speedIntensity, addIntroOutro, customTimestamps, colorGrade, transition, textOverlay, textEffect, stabilize, vocalVolume, watermark, exportQuality, exportCodec, subtitleStyle, capsulesCount, isCapsule, visualFilter }) {
   const tmpDir = "/tmp"
   const inputPaths = []
   const clips = []
@@ -860,6 +875,8 @@ async function processVideo({ jobId, videoUrls, videoPaths, prompt, options, mus
       const capsuleVfFilters = []
       if (isMiroir) capsuleVfFilters.push("hflip")
       capsuleVfFilters.push(capsuleFormatFilter)
+      const capsuleVisFilter = getVisualFilterFFmpeg(visualFilter)
+      if (capsuleVisFilter) capsuleVfFilters.push(capsuleVisFilter)
       capsuleVfFilters.push("format=yuv420p")
       const capsuleVf = capsuleVfFilters.join(",")
       console.log(`[capsule] Miroir=${isMiroir} vf="${capsuleVf}"`)
@@ -1086,6 +1103,8 @@ Règles timestamps: start+duration<=${Math.round(totalDuration)}, durées 10-30s
 
         const gradeFilter = getColorGradeFilter(colorGrade)
         if (gradeFilter) vfFilters.push(gradeFilter)
+        const visFilter = getVisualFilterFFmpeg(visualFilter)
+        if (visFilter) vfFilters.push(visFilter)
         vfFilters.push(`noise=alls=4:allf=t+u`)
         vfFilters.push(`vignette=PI/5`)
 
