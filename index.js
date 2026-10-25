@@ -15,7 +15,8 @@ const execAsync = promisify(exec)
 ffmpeg.setFfmpegPath(ffmpegPath)
 
 const app = express()
-app.use(cors())
+app.use(cors({ origin: "*", methods: ["GET","POST","OPTIONS"], allowedHeaders: ["Content-Type","Authorization"] }))
+app.options("*", cors())
 app.use(express.json({ limit: "50mb" }))
 
 const PORT = process.env.PORT || 3001
@@ -90,8 +91,9 @@ app.post("/prompt-help", async (req, res) => {
 })
 
 app.post("/generate", async (req, res) => {
+  console.log("[generate] requête reçue — videoPaths:", req.body?.videoPaths, "videoUrls:", req.body?.videoUrls)
   const { videoUrls, videoPaths, prompt, options, musicUrl, format, zoomIntensity, speedIntensity, addIntroOutro, customTimestamps, colorGrade, transition, textOverlay, stabilize, vocalVolume, exportQuality, exportCodec, watermark, visualFilter } = req.body
-  if (!videoUrls?.length && !videoPaths?.length) return res.status(400).json({ error: "Aucune vidéo" })
+  if (!videoUrls?.length && !videoPaths?.length) { console.log("[generate] ERREUR: aucune vidéo"); return res.status(400).json({ error: "Aucune vidéo" }) }
   const jobId = `job_${Date.now()}`
   jobs[jobId] = { status: "processing", progress: 0, clips: null, error: null }
   res.json({ jobId })
