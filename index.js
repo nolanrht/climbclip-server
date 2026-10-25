@@ -390,6 +390,9 @@ async function processVideo({ jobId, videoUrls, videoPaths, prompt, options, mus
     }
     if (!durations) durations = [{ start: 0, duration: 15, name: "Edit #1" }, { start: 10, duration: 20, name: "Edit #2" }, { start: 25, duration: 15, name: "Edit #3" }]
 
+    // Mode Miroir : 1 seul clip = vidéo entière flippée
+    if (options?.includes("Miroir")) durations = [{ start: 0, duration: totalDuration, name: "Miroir" }]
+
     jobs[jobId].progress = 48
 
     const targetFormat = format || "9:16"
@@ -461,6 +464,9 @@ async function processVideo({ jobId, videoUrls, videoPaths, prompt, options, mus
 
       // Watermark
       if (watermark) vfFilters.push(buildWatermarkFilter(clip.duration, targetFormat))
+
+      // Mirror
+      if (options?.includes("Miroir")) vfFilters.push("hflip")
 
       // Subtitles
       if (hasSrt) vfFilters.push(`subtitles=${srtPath}:force_style='FontSize=16,PrimaryColour=&HFFFFFF,OutlineColour=&H000000,Outline=2,Alignment=2'`)
