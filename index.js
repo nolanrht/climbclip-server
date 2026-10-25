@@ -16,7 +16,6 @@ ffmpeg.setFfmpegPath(ffmpegPath)
 
 const app = express()
 app.use(cors({ origin: "*", methods: ["GET","POST","OPTIONS"], allowedHeaders: ["Content-Type","Authorization"] }))
-app.options("*", cors())
 app.use(express.json({ limit: "50mb" }))
 
 const PORT = process.env.PORT || 3001
