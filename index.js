@@ -105,6 +105,34 @@ app.get("/status/:jobId", (req, res) => {
   res.json(job)
 })
 
+app.get("/stream/:jobId", (req, res) => {
+  res.setHeader("Content-Type", "text/event-stream")
+  res.setHeader("Cache-Control", "no-cache")
+  res.setHeader("Connection", "keep-alive")
+  res.flushHeaders()
+
+  const jobId = req.params.jobId
+  let lastProgress = -1
+
+  const interval = setInterval(() => {
+    const job = jobs[jobId]
+    if (!job) { res.write(`data: ${JSON.stringify({ status: "error", message: "Job introuvable" })}\n\n`); clearInterval(interval); res.end(); return }
+    if (job.progress !== lastProgress) {
+      lastProgress = job.progress
+      res.write(`data: ${JSON.stringify({ progress: job.progress, message: job.message || "" })}\n\n`)
+    }
+    if (job.status === "done") {
+      res.write(`data: ${JSON.stringify({ status: "done", progress: 100, clips: job.clips })}\n\n`)
+      clearInterval(interval); res.end()
+    } else if (job.status === "error") {
+      res.write(`data: ${JSON.stringify({ status: "error", message: job.error })}\n\n`)
+      clearInterval(interval); res.end()
+    }
+  }, 500)
+
+  req.on("close", () => clearInterval(interval))
+})
+
 // ─── HELPERS ───────────────────────────────────────────────────────────────
 
 function getFormatFilter(format) {
